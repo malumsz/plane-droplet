@@ -252,89 +252,88 @@ private struct PlaneTasksSettings: View {
     var body: some View {
         DropletSettingsPane {
             DropletSettingsSection {
-                settingsSectionHeader("Plane account")
+                numberedSectionHeader("1", "Connect your Plane account")
             } content: {
                 DropletSettingsCard {
-                    VStack(alignment: .leading, spacing: 0) {
-                        stepHeader(number: "1", title: "Connect your Plane account")
-                        VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                            fieldLabel("Workspace slug")
-                            TextField("", text: droplet.workspaceBinding, prompt: Text("your-workspace"))
-                                .textFieldStyle(.roundedBorder)
-                            helperText("Find the workspace slug in your Plane URL.")
-
-                            fieldLabel("Personal access token")
-                                .padding(.top, DroppySpacing.sm)
-                            SecureField("", text: droplet.tokenBinding, prompt: Text("plane_api_…"))
-                                .textFieldStyle(.roundedBorder)
-                            helperText("Create a personal API token in your Plane account settings.")
-                        }
-                        .padding(.top, DroppySpacing.md)
-
-                        DropletSettingsDivider()
-                            .padding(.vertical, DroppySpacing.md)
-
-                        stepHeader(number: "2", title: "Set the API URL")
-                        VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                            fieldLabel("Plane API URL")
-                            TextField("", text: droplet.baseURLBinding, prompt: Text("https://api.plane.so"))
-                                .textFieldStyle(.roundedBorder)
-                            helperText("For Plane Cloud, use https://api.plane.so.")
-                        }
-                        .padding(.top, DroppySpacing.md)
-
-                        DropletSettingsDivider()
-                            .padding(.vertical, DroppySpacing.md)
-
-                        stepHeader(number: "3", title: "Connect and test")
-                        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-                            HStack {
-                                Text("Connection")
-                                    .font(.system(size: 13, weight: .medium))
-                                Spacer()
-                                DropletValuePill(
-                                    text: droplet.isConfigured ? "Ready" : "Needs setup"
-                                )
-                                Button("Refresh") {
-                                    droplet.refresh()
-                                }
-                                .buttonStyle(DroppyQuietButtonStyle(size: .small))
-                                .disabled(!droplet.isConfigured)
-                            }
-                            helperText("Fill in the details above, then refresh to load your assigned tasks.")
-                        }
-                        .padding(.top, DroppySpacing.md)
+                    DropletControlRow(
+                        title: "Workspace slug",
+                        infoTip: "Find the workspace slug in your Plane URL."
+                    ) {
+                        TextField("", text: droplet.workspaceBinding, prompt: Text("your-workspace"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 220)
                     }
-                    .padding(DroppySpacing.md)
+                    DropletControlRow(
+                        title: "Personal access token",
+                        infoTip: "Create a personal API token in your Plane account settings."
+                    ) {
+                        SecureField("", text: droplet.tokenBinding, prompt: Text("plane_api_…"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 220)
+                    }
+                }
+            }
+
+            DropletSettingsSection {
+                numberedSectionHeader("2", "API URL")
+            } content: {
+                DropletSettingsCard {
+                    DropletControlRow(
+                        title: "Plane API URL",
+                        infoTip: "For the default Plane Cloud URL (app.plane.so), use https://api.plane.so here."
+                    ) {
+                        TextField("", text: droplet.baseURLBinding, prompt: Text("https://api.plane.so"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 220)
+                    }
+                }
+            }
+
+            DropletSettingsSection {
+                numberedSectionHeader("3", "Connection")
+            } content: {
+                DropletSettingsCard {
+                    DropletControlRow(
+                        title: "Status",
+                        infoTip: "Fill in the details above, then refresh to load your assigned tasks."
+                    ) {
+                        statusChip(isReady: droplet.isConfigured)
+                    }
+                    DropletControlRow(title: "Refresh") {
+                        Button("Refresh") {
+                            droplet.refresh()
+                        }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                        .disabled(!droplet.isConfigured)
+                    }
                 }
             }
         }
     }
 
-    private func stepHeader(number: String, title: String) -> some View {
-        HStack(alignment: .center, spacing: DroppySpacing.sm) {
-            Text(number)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.black.opacity(0.85))
-                .frame(width: 22, height: 22)
-                .background(Color.green, in: Circle())
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-            Spacer(minLength: 0)
+    /// A section header with a numbered SF Symbol circle in front of it,
+    /// e.g. "1.circle.fill". Native, vector, no hand-drawn shapes.
+    private func numberedSectionHeader(_ number: String, _ title: String) -> some View {
+        HStack(spacing: DroppySpacing.xs) {
+            Image(systemName: "\(number).circle.fill")
+                .foregroundStyle(.blue)
+                .font(.system(size: 14))
+            settingsSectionHeader(LocalizedStringKey(title))
         }
     }
 
-    private func fieldLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.primary)
-    }
-
-    private func helperText(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+    /// A small status chip, colored green when ready and orange when it
+    /// still needs setup. DropletValuePill has no color parameter, so this
+    /// is a lightweight custom chip using the same rounded, borderless
+    /// language as the rest of the design system.
+    private func statusChip(isReady: Bool) -> some View {
+        let color: Color = isReady ? .green : .orange
+        return Text(isReady ? "Ready" : "Needs setup")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, DroppySpacing.sm)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.15), in: Capsule(style: .continuous))
     }
 }
 
