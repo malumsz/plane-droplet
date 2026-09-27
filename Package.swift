@@ -1,4 +1,3 @@
-
 // swift-tools-version: 6.2
 import PackageDescription
 
@@ -27,9 +26,6 @@ let package = Package(
                    name: "DroppyKit",
                    package: "droppykit"
                )
-           ],
-           resources: [
-               .process("Resources")
            ]
        ),
        .executableTarget(

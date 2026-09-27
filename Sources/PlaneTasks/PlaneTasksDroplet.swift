@@ -246,105 +246,62 @@ private struct PlaneTasksWidget: View {
     }
 }
 
-/// Loads the compiled Localizable.xcstrings table from the SwiftPM resource bundle.
-/// No translation values are duplicated in Swift.
-private enum PlaneTasksLocalization {
-    static let bundle: Bundle = {
-        let bundleName = "PlaneTasks_PlaneTasks"
-        var roots: [URL] = []
-
-        if let url = Bundle.main.resourceURL { roots.append(url) }
-        if let url = Bundle.main.executableURL?.deletingLastPathComponent() { roots.append(url) }
-        let pluginBundle = Bundle(for: PlaneTasksPrincipal.self)
-        roots.append(pluginBundle.bundleURL)
-        if let url = pluginBundle.resourceURL { roots.append(url) }
-
-        var candidates: [URL] = []
-        for root in roots {
-            candidates.append(root.appendingPathComponent("\\(bundleName).bundle", isDirectory: true))
-            candidates.append(root.appendingPathComponent("Contents/Resources/\\(bundleName).bundle", isDirectory: true))
-            candidates.append(root.appendingPathComponent("Resources/\\(bundleName).bundle", isDirectory: true))
-        }
-
-        for candidate in candidates {
-            if let bundle = Bundle(url: candidate) {
-                return bundle
-            }
-        }
-
-        // Last safe fallback: use the host bundle's localization table, if it
-        // embeds the same catalog. This avoids Bundle.module's fatalError.
-        return .main
-    }()
-
-    static func text(_ key: String, fallback: String = "") -> String {
-        NSLocalizedString(key, tableName: "Localizable", bundle: bundle,
-                          value: fallback.isEmpty ? key : fallback, comment: "")
-    }
-}
-
-private func settingsText(_ key: String, fallback: String = "") -> String {
-    PlaneTasksLocalization.text(key, fallback: fallback)
-}
-
 private struct PlaneTasksSettings: View {
     @ObservedObject var droplet: PlaneTasksDroplet
 
     var body: some View {
         DropletSettingsPane {
             DropletSettingsSection {
-                settingsSectionHeader(LocalizedStringKey(settingsText("settings.account.title", fallback: "Plane account")))
+                settingsSectionHeader("Plane account")
             } content: {
                 DropletSettingsCard {
                     VStack(alignment: .leading, spacing: 0) {
-                        stepHeader(number: "1", title: settingsText("settings.account.step1.title", fallback: "Connect your Plane account"))
+                        stepHeader(number: "1", title: "Connect your Plane account")
                         VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                            fieldLabel(settingsText("settings.workspace.label", fallback: "Workspace slug"))
+                            fieldLabel("Workspace slug")
                             TextField("", text: droplet.workspaceBinding, prompt: Text("your-workspace"))
                                 .textFieldStyle(.roundedBorder)
-                            helperText(settingsText("settings.workspace.help", fallback: "Find the workspace slug in your Plane URL."))
+                            helperText("Find the workspace slug in your Plane URL.")
 
-                            fieldLabel(settingsText("settings.token.label", fallback: "Personal access token"))
+                            fieldLabel("Personal access token")
                                 .padding(.top, DroppySpacing.sm)
                             SecureField("", text: droplet.tokenBinding, prompt: Text("plane_api_…"))
                                 .textFieldStyle(.roundedBorder)
-                            helperText(settingsText("settings.token.help", fallback: "Create a personal API token in your Plane account settings."))
+                            helperText("Create a personal API token in your Plane account settings.")
                         }
                         .padding(.top, DroppySpacing.md)
 
                         DropletSettingsDivider()
                             .padding(.vertical, DroppySpacing.md)
 
-                        stepHeader(number: "2", title: settingsText("settings.api.step2.title", fallback: "Set the API URL"))
+                        stepHeader(number: "2", title: "Set the API URL")
                         VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                            fieldLabel(settingsText("settings.api.label", fallback: "Plane API URL"))
+                            fieldLabel("Plane API URL")
                             TextField("", text: droplet.baseURLBinding, prompt: Text("https://api.plane.so"))
                                 .textFieldStyle(.roundedBorder)
-                            helperText(settingsText("settings.api.help", fallback: "For Plane Cloud, use https://api.plane.so."))
+                            helperText("For Plane Cloud, use https://api.plane.so.")
                         }
                         .padding(.top, DroppySpacing.md)
 
                         DropletSettingsDivider()
                             .padding(.vertical, DroppySpacing.md)
 
-                        stepHeader(number: "3", title: settingsText("settings.connection.step3.title", fallback: "Connect and test"))
+                        stepHeader(number: "3", title: "Connect and test")
                         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
                             HStack {
-                                Text(settingsText("settings.connection.label", fallback: "Connection"))
+                                Text("Connection")
                                     .font(.system(size: 13, weight: .medium))
                                 Spacer()
                                 DropletValuePill(
-                                    text: droplet.isConfigured
-                                        ? settingsText("settings.connection.ready", fallback: "Ready")
-                                        : settingsText("settings.connection.needsSetup", fallback: "Needs setup")
+                                    text: droplet.isConfigured ? "Ready" : "Needs setup"
                                 )
-                                Button(settingsText("settings.refresh.button", fallback: "Refresh")) {
+                                Button("Refresh") {
                                     droplet.refresh()
                                 }
                                 .buttonStyle(DroppyQuietButtonStyle(size: .small))
                                 .disabled(!droplet.isConfigured)
                             }
-                            helperText(settingsText("settings.connection.help", fallback: "Fill in the details above, then refresh to load your assigned tasks."))
+                            helperText("Fill in the details above, then refresh to load your assigned tasks.")
                         }
                         .padding(.top, DroppySpacing.md)
                     }
@@ -626,4 +583,3 @@ private final class TokenStore {
         if SecItemUpdate(query as CFDictionary, update as CFDictionary) == errSecItemNotFound { var add = query; add[kSecValueData as String] = data; SecItemAdd(add as CFDictionary, nil) }
     }
 }
-
