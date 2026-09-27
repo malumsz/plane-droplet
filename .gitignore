@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+droppykit/
+*.xcodeproj
+.DS_Store
+shots/
+report.json
+.index-build/

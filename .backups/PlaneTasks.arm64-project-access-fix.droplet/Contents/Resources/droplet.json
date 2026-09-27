@@ -1,0 +1,31 @@
+{
+  "id": "plane-tasks",
+  "name": "Plane Tasks",
+  "version": "1.0.0",
+  "summary": "Your open Plane tasks, on the Droppy shelf",
+  "description": "Shows open Plane work items assigned to the person behind the configured personal access token.",
+  "category": "Productivity",
+  "kit": {
+    "abi": 1,
+    "minAPI": "1.9.0"
+  },
+  "minAppVersion": "15.3.0",
+  "capabilities": ["network-client"],
+  "surfaces": [
+    "shelf-widget",
+    "settings-pane"
+  ],
+  "icon": "PlaneTasks.icon",
+  "creator": {
+    "name": "Your name",
+    "kind": "community",
+    "url": "https://example.com",
+    "avatar": "Creator.png",
+    "gitlab": "your-gitlab-username"
+  },
+  "source": {
+    "repository": "https://gitlab.com/droppyformac1/droplets/-/tree/main/droplets/plane-tasks",
+    "license": "MIT"
+  },
+  "keywords": ["Plane", "tasks", "assigned", "productivity"]
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "droppykit": {
+      "command": "/private/tmp/droppykit/Scripts/droppykit",
+      "args": [
+        "mcp",
+        "--package",
+        "/Users/malu/Documents/droppy/plane droplet/plane-tasks"
+      ]
+    }
+  }
+}

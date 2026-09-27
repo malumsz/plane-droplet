@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>PlaneTasks</string>
+	<key>CFBundleIconFile</key>
+	<string>PlaneTasks</string>
+	<key>CFBundleIconName</key>
+	<string>PlaneTasks</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.getdroppy.droplet.plane-tasks</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Plane Tasks</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+	<key>DroppyDropletID</key>
+	<string>plane-tasks</string>
+	<key>DroppyKitABI</key>
+	<integer>1</integer>
+	<key>DroppyKitMinAPI</key>
+	<string>1.9.0</string>
+	<key>DroppyMinAppVersion</key>
+	<string>15.3.0</string>
+	<key>DroppyPermissions</key>
+	<array>
+		<string>network-client</string>
+	</array>
+	<key>NSPrincipalClass</key>
+	<string>PlaneTasksPrincipal</string>
+</dict>
+</plist>
