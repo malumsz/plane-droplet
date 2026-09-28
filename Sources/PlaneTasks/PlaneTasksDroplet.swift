@@ -20,7 +20,6 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     @Published fileprivate var selectedStatuses: Set<String> = []
     @Published fileprivate var searchText = ""
     @Published fileprivate var selectedTaskID: String?
-    @Published fileprivate var showCompleted = false
     @Published fileprivate var pinnedIDs: Set<String> = UserDefaults.standard.stringArray(forKey: "planeTasks.pinnedIDs").map(Set.init) ?? []
     private var host: DropletHost?
     private var reloadTask: Task<Void, Never>?
@@ -37,8 +36,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     fileprivate var projects: [String] { ["All"] + Array(Set(tasks.map(\.project).filter { !$0.isEmpty })).sorted() }
     fileprivate var visibleTasks: [PlaneTask] {
         tasks.filter { task in
-            (showCompleted || !["completed", "cancelled"].contains(task.stateGroup.lowercased()))
-            && (selectedStatuses.isEmpty || selectedStatuses.contains(task.status))
+            (selectedStatuses.isEmpty || selectedStatuses.contains(task.status))
             && (selectedProject == "All" || task.project == selectedProject)
             && (searchText.isEmpty || task.name.localizedCaseInsensitiveContains(searchText) || task.reference.localizedCaseInsensitiveContains(searchText) || task.project.localizedCaseInsensitiveContains(searchText))
         }.sorted {
@@ -96,15 +94,31 @@ extension PlaneTasksDroplet: SettingsPaneProviding {
 private struct PlaneTasksWidget: View {
     @ObservedObject var droplet: PlaneTasksDroplet
     let context: ShelfWidgetContext
+    @State private var isProjectPopoverPresented = false
+    @State private var chipsOffsetX: CGFloat = 0
+    @State private var chipsContentWidth: CGFloat = 0
+    @State private var chipsViewportWidth: CGFloat = 0
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             HStack(spacing: DroppySpacing.xsm) {
-                Image(systemName: "checklist").font(.system(size: 12, weight: .medium))
-                Text("Plane Tasks").font(.system(size: 12, weight: .semibold))
-                Text("\(droplet.visibleTasks.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Image(systemName: "checklist")
+                    .font(.system(size: 10, weight: .medium))
+                Text("Plane Tasks")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("\(droplet.visibleTasks.count)")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .padding(.horizontal, DroppySpacing.xsm)
+                    .padding(.vertical, 2)
+                    .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
                 Spacer(minLength: 0)
-                Button { droplet.refresh() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(DroppyCircleButtonStyle(size: 20)).help("Refresh")
-            }.foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                Button { droplet.refresh() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                .help("Refresh")
+            }
+            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
             if context.isCompact {
                 Text("\(droplet.tasks.count)").font(.system(size: 26, weight: .semibold, design: .rounded))
                 Text("assigned tasks").font(.caption).foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
@@ -117,26 +131,44 @@ private struct PlaneTasksWidget: View {
                         .frame(maxWidth: .infinity)
                         .padding()
                 case .loaded:
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                        HStack(spacing: DroppySpacing.xsm) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                             TextField("Search title, ID, project…", text: $droplet.searchText)
-                                .textFieldStyle(.roundedBorder)
-                            Menu {
-                                Picker("Project", selection: $droplet.selectedProject) {
-                                    ForEach(droplet.projects, id: \.self) { Text($0).tag($0) }
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 13))
+                                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                            if !droplet.searchText.isEmpty {
+                                Button {
+                                    droplet.searchText = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                                 }
-                                Toggle("Include completed/cancelled", isOn: $droplet.showCompleted)
-                            } label: {
-                                Image(systemName: "line.3.horizontal.decrease.circle").font(.title3)
+                                .buttonStyle(.plain)
+                                .help("Clear search")
                             }
-                            .help("Filter tasks")
                         }
-                        statusChips
+                        .padding(.horizontal, DroppySpacing.sm)
+                        .padding(.vertical, DroppySpacing.xsm)
+                        .background(
+                            AdaptiveColors.notchSurfaceCardFill,
+                            in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
+                        )
+
+                        HStack(alignment: .center, spacing: DroppySpacing.sm) {
+                            statusChips
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            projectFilter
+                        }
                     }
                     .onChange(of: droplet.searchText) { _, _ in
                         droplet.selectedTaskID = nil
                     }
-                    ScrollView {
+                    ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 5) {
                             ForEach(droplet.visibleTasks) { task in
                                 taskRow(task)
@@ -150,41 +182,163 @@ private struct PlaneTasksWidget: View {
                 }
             }
             Spacer(minLength: 0)
-        }.padding(context.contentInsets).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        // Preserve the internal breathing room that was present in the earlier layout.
+        .padding(.horizontal, DroppySpacing.md)
+        .padding(.top, DroppySpacing.md)
+        .padding(context.contentInsets)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
     
+    private var projectFilter: some View {
+        Button {
+            isProjectPopoverPresented.toggle()
+        } label: {
+            HStack(spacing: DroppySpacing.xsm) {
+                Image(systemName: "folder")
+                    .font(.system(size: 11, weight: .medium))
+                Text(droplet.selectedProject == "All" ? "Project" : droplet.selectedProject)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+        }
+        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+        .fixedSize()
+        .help("Filter by project")
+        .popover(isPresented: $isProjectPopoverPresented, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
+                Text("Projects")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .padding(.horizontal, DroppySpacing.sm)
+                    .padding(.top, DroppySpacing.xsm)
+
+                projectOption("All projects", value: "All")
+                Divider().overlay(AdaptiveColors.notchSurfaceTertiaryText.opacity(0.25))
+                ForEach(droplet.projects.filter { $0 != "All" }, id: \.self) { project in
+                    projectOption(project, value: project)
+                }
+            }
+            .padding(DroppySpacing.sm)
+            .frame(minWidth: 210, maxWidth: 280)
+            .droppyFlatGlassControls()
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private func projectOption(_ title: String, value: String) -> some View {
+        Button {
+            droplet.selectedProject = value
+            droplet.selectedTaskID = nil
+            isProjectPopoverPresented = false
+        } label: {
+            HStack(spacing: DroppySpacing.sm) {
+                Text(title)
+                    .font(.system(size: 12, weight: droplet.selectedProject == value ? .semibold : .regular))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if droplet.selectedProject == value {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            }
+            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+            .padding(.horizontal, DroppySpacing.sm)
+            .padding(.vertical, DroppySpacing.xsm)
+            .contentShape(RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
+        }
+        .buttonStyle(DroppyGlassButtonStyle())
+    }
+
+    private var canScrollChipsLeft: Bool { chipsOffsetX > 1 }
+    private var canScrollChipsRight: Bool { (chipsContentWidth - chipsViewportWidth - chipsOffsetX) > 1 }
+
     private var statusChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+            HStack(spacing: DroppySpacing.xsm) {
                 chip(label: "All", isSelected: droplet.selectedStatuses.isEmpty) {
-                    droplet.selectedStatuses.removeAll()
+                    withAnimation(.snappy(duration: 0.22)) {
+                        droplet.selectedStatuses.removeAll()
+                    }
                 }
                 ForEach(droplet.statuses, id: \.self) { status in
                     let isOn = droplet.selectedStatuses.contains(status)
                     chip(label: status, isSelected: isOn) {
-                        if isOn {
-                            droplet.selectedStatuses.remove(status)
-                        } else {
-                            droplet.selectedStatuses.insert(status)
+                        withAnimation(.snappy(duration: 0.22)) {
+                            if isOn {
+                                droplet.selectedStatuses.remove(status)
+                            } else {
+                                droplet.selectedStatuses.insert(status)
+                            }
                         }
                     }
                 }
             }
         }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentOffset.x
+        } action: { _, newValue in
+            chipsOffsetX = newValue
+        }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentSize.width
+        } action: { _, newValue in
+            chipsContentWidth = newValue
+        }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.containerSize.width
+        } action: { _, newValue in
+            chipsViewportWidth = newValue
+        }
+        // Fade the clipped end of the status row instead of ending abruptly
+        // beside the project filter — but only on the side that actually
+        // still has more chips to reveal, and it disappears once you've
+        // scrolled all the way there.
+        .mask {
+            HStack(spacing: 0) {
+                LinearGradient(
+                    colors: [.clear, .black],
+                    startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: canScrollChipsLeft ? 18 : 0)
+
+                Color.black
+
+                LinearGradient(
+                    colors: [.black, .clear],
+                    startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: canScrollChipsRight ? 18 : 0)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: canScrollChipsLeft)
+        .animation(.easeInOut(duration: 0.15), value: canScrollChipsRight)
     }
 
     private func chip(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    Capsule().fill(isSelected ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.15))
-                )
-                .foregroundStyle(isSelected ? .primary : .secondary)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .lineLimit(1)
+                .padding(.horizontal, DroppySpacing.sm)
+                .padding(.vertical, DroppySpacing.xsm)
+                .foregroundStyle(isSelected ? Color.white : AdaptiveColors.notchSurfaceSecondaryText)
+                .background {
+                    if isSelected {
+                        Capsule(style: .continuous)
+                            .fill(Color.blue)
+                    } else {
+                        Capsule(style: .continuous)
+                            .fill(AdaptiveColors.notchSurfaceCardFill)
+                    }
+                }
         }
         .buttonStyle(.plain)
+        .animation(.snappy(duration: 0.22), value: isSelected)
         .help(isSelected ? "Selected" : "Filter by \(label)")
     }
     
