@@ -16,6 +16,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     public nonisolated static let id: DropletID = "plane-tasks"
     @Published fileprivate var tasks: [PlaneTask] = []
     @Published fileprivate var state: LoadState = .needsSetup
+    @Published fileprivate var settingsRevision = 0
     @Published fileprivate var selectedProject = "All"
     @Published fileprivate var selectedStatuses: Set<String> = []
     @Published fileprivate var searchText = ""
@@ -32,11 +33,41 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     private var workspace: String { host?.preferences.value(forKey: "workspace", default: "").trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
     private var baseURL: String { (host?.preferences.value(forKey: "baseURL", default: "https://api.plane.so") ?? "https://api.plane.so").trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) }
 
-    fileprivate var statuses: [String] { Array(Set(tasks.map(\.status).filter { !$0.isEmpty && $0 != "Unknown" })).sorted() }
+    /// When "All projects" is selected, these are the standard Plane status
+    /// groups (Backlog, Todo, In Progress, Done, Cancelled) merged across
+    /// every project, even if each project names its states differently.
+    /// With one project selected, these are that project's own status names.
+    fileprivate var statusFilterOptions: [StatusFilterOption] {
+        if selectedProject == "All" {
+            let order = ["backlog", "unstarted", "started", "completed", "cancelled"]
+            let present = Set(tasks.map(\.stateGroup).filter { !$0.isEmpty })
+            let ordered = order.filter { present.contains($0) } + present.subtracting(order).sorted()
+            return ordered.map { StatusFilterOption(id: $0, label: Self.groupDisplayName($0), group: $0) }
+        } else {
+            var groupByStatus: [String: String] = [:]
+            for task in tasks where task.project == selectedProject && !task.status.isEmpty && task.status != "Unknown" {
+                if groupByStatus[task.status] == nil { groupByStatus[task.status] = task.stateGroup }
+            }
+            return groupByStatus.keys.sorted().map { StatusFilterOption(id: $0, label: $0, group: groupByStatus[$0] ?? "") }
+        }
+    }
+
+    fileprivate static func groupDisplayName(_ group: String) -> String {
+        switch group.lowercased() {
+        case "backlog": return "Backlog"
+        case "unstarted": return "Todo"
+        case "started": return "In Progress"
+        case "completed": return "Done"
+        case "cancelled": return "Cancelled"
+        default: return group.isEmpty ? "Unknown" : group.capitalized
+        }
+    }
     fileprivate var projects: [String] { ["All"] + Array(Set(tasks.map(\.project).filter { !$0.isEmpty })).sorted() }
     fileprivate var visibleTasks: [PlaneTask] {
         tasks.filter { task in
-            (selectedStatuses.isEmpty || selectedStatuses.contains(task.status))
+            let statusMatches = selectedStatuses.isEmpty
+                || (selectedProject == "All" ? selectedStatuses.contains(task.stateGroup) : selectedStatuses.contains(task.status))
+            return statusMatches
             && (selectedProject == "All" || task.project == selectedProject)
             && (searchText.isEmpty || task.name.localizedCaseInsensitiveContains(searchText) || task.reference.localizedCaseInsensitiveContains(searchText) || task.project.localizedCaseInsensitiveContains(searchText))
         }.sorted {
@@ -71,9 +102,35 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
         } catch { tasks = []; state = .failed(error.localizedDescription); host?.log.error("Plane Tasks request failed: \(error.localizedDescription)") }
     }
 
-    var workspaceBinding: Binding<String> { Binding(get: { self.workspace }, set: { self.host?.preferences.setValue($0, forKey: "workspace") }) }
-    var baseURLBinding: Binding<String> { Binding(get: { self.baseURL }, set: { self.host?.preferences.setValue($0, forKey: "baseURL") }) }
-    var tokenBinding: Binding<String> { Binding(get: { self.tokenStore.read() ?? "" }, set: { self.tokenStore.write($0) }) }
+    var workspaceBinding: Binding<String> {
+        Binding(
+            get: { self.workspace },
+            set: {
+                self.host?.preferences.setValue($0, forKey: "workspace")
+                self.settingsRevision += 1
+            }
+        )
+    }
+
+    var baseURLBinding: Binding<String> {
+        Binding(
+            get: { self.baseURL },
+            set: {
+                self.host?.preferences.setValue($0, forKey: "baseURL")
+                self.settingsRevision += 1
+            }
+        )
+    }
+
+    var tokenBinding: Binding<String> {
+        Binding(
+            get: { self.tokenStore.read() ?? "" },
+            set: {
+                self.tokenStore.write($0)
+                self.settingsRevision += 1
+            }
+        )
+    }
     var isConfigured: Bool { !workspace.isEmpty && !(tokenStore.read() ?? "").isEmpty }
     func openSettings() { _ = host?.workspace.openSettings() }
 }
@@ -89,6 +146,12 @@ extension PlaneTasksDroplet: ShelfWidgetProviding {
 extension PlaneTasksDroplet: SettingsPaneProviding {
     public func makeSettingsPane(context: SettingsPaneContext) -> AnyView { AnyView(PlaneTasksSettings(droplet: self)) }
     public var settingsSearchEntries: [SettingsSearchEntry] { [SettingsSearchEntry(title: "Plane connection", keywords: ["plane", "token", "workspace", "API"])] }
+}
+
+fileprivate struct StatusFilterOption: Identifiable {
+    let id: String
+    let label: String
+    let group: String
 }
 
 private struct PlaneTasksWidget: View {
@@ -233,6 +296,7 @@ private struct PlaneTasksWidget: View {
     private func projectOption(_ title: String, value: String) -> some View {
         Button {
             droplet.selectedProject = value
+            droplet.selectedStatuses.removeAll()
             droplet.selectedTaskID = nil
             isProjectPopoverPresented = false
         } label: {
@@ -265,14 +329,14 @@ private struct PlaneTasksWidget: View {
                         droplet.selectedStatuses.removeAll()
                     }
                 }
-                ForEach(droplet.statuses, id: \.self) { status in
-                    let isOn = droplet.selectedStatuses.contains(status)
-                    chip(label: status, isSelected: isOn) {
+                ForEach(droplet.statusFilterOptions) { option in
+                    let isOn = droplet.selectedStatuses.contains(option.id)
+                    chip(label: option.label, isSelected: isOn, dotColor: groupColor(option.group)) {
                         withAnimation(.snappy(duration: 0.22)) {
                             if isOn {
-                                droplet.selectedStatuses.remove(status)
+                                droplet.selectedStatuses.remove(option.id)
                             } else {
-                                droplet.selectedStatuses.insert(status)
+                                droplet.selectedStatuses.insert(option.id)
                             }
                         }
                     }
@@ -319,11 +383,32 @@ private struct PlaneTasksWidget: View {
         .animation(.easeInOut(duration: 0.15), value: canScrollChipsRight)
     }
 
-    private func chip(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    /// Standard Plane status-group colors: gray for backlog, blue for
+    /// todo/unstarted, orange for in progress, green for done, red for
+    /// cancelled. Anything else falls back to gray.
+    private func groupColor(_ group: String) -> Color {
+        switch group.lowercased() {
+        case "backlog": return .gray
+        case "unstarted": return .blue
+        case "started": return .orange
+        case "completed": return .green
+        case "cancelled": return .red
+        default: return .gray
+        }
+    }
+
+    private func chip(label: String, isSelected: Bool, dotColor: Color? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(label)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
-                .lineLimit(1)
+            HStack(spacing: 5) {
+                if let dotColor {
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 6, height: 6)
+                }
+                Text(label)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+            }
                 .padding(.horizontal, DroppySpacing.sm)
                 .padding(.vertical, DroppySpacing.xsm)
                 .foregroundStyle(isSelected ? Color.white : AdaptiveColors.notchSurfaceSecondaryText)
@@ -352,7 +437,13 @@ private struct PlaneTasksWidget: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         Text(task.reference).font(.caption.monospaced()).foregroundStyle(.secondary)
-                        Text(task.status).font(.caption2).padding(.horizontal, 5).padding(.vertical, 2).background(.quaternary, in: Capsule())
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(groupColor(task.stateGroup))
+                                .frame(width: 5, height: 5)
+                            Text(task.status).font(.caption2)
+                        }
+                        .padding(.horizontal, 5).padding(.vertical, 2).background(.quaternary, in: Capsule())
                     }
                     Text(task.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                 }
@@ -400,10 +491,49 @@ private struct PlaneTasksWidget: View {
     }
 }
 
+/// A text field that keeps its own local draft while typing and only writes
+/// back to `committedValue` when the person presses Enter or clicks away,
+/// instead of on every keystroke.
+private struct CommitField: View {
+    let prompt: String
+    var isSecure: Bool = false
+    @Binding var committedValue: String
+
+    @State private var draft: String = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Group {
+            if isSecure {
+                SecureField("", text: $draft, prompt: Text(prompt))
+            } else {
+                TextField("", text: $draft, prompt: Text(prompt))
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .frame(width: 220)
+        .focused($isFocused)
+        .onAppear { draft = committedValue }
+        .onSubmit {
+            commit()
+            isFocused = false
+        }
+        .onChange(of: isFocused) { _, focused in
+            if !focused { commit() }
+        }
+    }
+
+    private func commit() {
+        if draft != committedValue { committedValue = draft }
+    }
+}
+
 private struct PlaneTasksSettings: View {
     @ObservedObject var droplet: PlaneTasksDroplet
 
     var body: some View {
+        let _ = droplet.settingsRevision
+
         DropletSettingsPane {
             DropletSettingsSection {
                 numberedSectionHeader("1", "Connect your Plane account")
@@ -413,17 +543,13 @@ private struct PlaneTasksSettings: View {
                         title: "Workspace slug",
                         infoTip: "Find the workspace slug in your Plane URL."
                     ) {
-                        TextField("", text: droplet.workspaceBinding, prompt: Text("your-workspace"))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 220)
+                        CommitField(prompt: "your-workspace", committedValue: droplet.workspaceBinding)
                     }
                     DropletControlRow(
                         title: "Personal access token",
                         infoTip: "Create a personal API token in your Plane account settings."
                     ) {
-                        SecureField("", text: droplet.tokenBinding, prompt: Text("plane_api_…"))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 220)
+                        CommitField(prompt: "plane_api_…", isSecure: true, committedValue: droplet.tokenBinding)
                     }
                 }
             }
@@ -436,9 +562,7 @@ private struct PlaneTasksSettings: View {
                         title: "Plane API URL",
                         infoTip: "For the default Plane Cloud URL (app.plane.so), use https://api.plane.so here."
                     ) {
-                        TextField("", text: droplet.baseURLBinding, prompt: Text("https://api.plane.so"))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 220)
+                        CommitField(prompt: "https://api.plane.so", committedValue: droplet.baseURLBinding)
                     }
                 }
             }
