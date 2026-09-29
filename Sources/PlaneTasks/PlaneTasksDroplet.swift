@@ -21,7 +21,6 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     @Published fileprivate var selectedStatuses: Set<String> = []
     @Published fileprivate var searchText = ""
     @Published fileprivate var selectedTaskID: String?
-    @Published fileprivate var pinnedIDs: Set<String> = UserDefaults.standard.stringArray(forKey: "planeTasks.pinnedIDs").map(Set.init) ?? []
     private var host: DropletHost?
     private var reloadTask: Task<Void, Never>?
     private let tokenStore = TokenStore(service: "app.getdroppy.plane-tasks")
@@ -71,16 +70,10 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
             && (selectedProject == "All" || task.project == selectedProject)
             && (searchText.isEmpty || task.name.localizedCaseInsensitiveContains(searchText) || task.reference.localizedCaseInsensitiveContains(searchText) || task.project.localizedCaseInsensitiveContains(searchText))
         }.sorted {
-            let pinA = pinnedIDs.contains($0.id), pinB = pinnedIDs.contains($1.id)
-            if pinA != pinB { return pinA }
-            return ($0.targetDate ?? "9999-12-31", $0.name) < ($1.targetDate ?? "9999-12-31", $1.name)
+            ($0.targetDate ?? "9999-12-31", $0.name) < ($1.targetDate ?? "9999-12-31", $1.name)
         }
     }
     fileprivate var selectedTask: PlaneTask? { tasks.first { $0.id == selectedTaskID } }
-    fileprivate func togglePin(_ task: PlaneTask) {
-        if pinnedIDs.contains(task.id) { pinnedIDs.remove(task.id) } else { pinnedIDs.insert(task.id) }
-        UserDefaults.standard.set(Array(pinnedIDs), forKey: "planeTasks.pinnedIDs")
-    }
 
     private func loadTasks() async {
         guard !workspace.isEmpty, let token = tokenStore.read(), !token.isEmpty else { state = .needsSetup; tasks = []; return }
@@ -161,7 +154,57 @@ private struct PlaneTasksWidget: View {
     @State private var chipsOffsetX: CGFloat = 0
     @State private var chipsContentWidth: CGFloat = 0
     @State private var chipsViewportWidth: CGFloat = 0
+    @State private var copiedFeedback: String? = nil
+    @State private var detailTask: PlaneTask?
+    @State private var isShowingDetail = false
+
     var body: some View {
+        Group {
+            if context.isCompact {
+                compactContent
+            } else {
+                GeometryReader { proxy in
+                    ZStack(alignment: .topLeading) {
+                        taskListScreen
+                            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                            .offset(x: isShowingDetail ? -proxy.size.width : 0)
+
+                        if let detailTask {
+                            detailScreen(detailTask)
+                                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                                .offset(x: isShowingDetail ? 0 : proxy.size.width)
+                        }
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                    .clipped()
+                    .mask(Rectangle())
+                }
+            }
+        }
+        // Preserve the internal breathing room that was present in the earlier layout.
+        .padding(.horizontal, DroppySpacing.md)
+        .padding(.top, DroppySpacing.md)
+        .padding(context.contentInsets)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var compactContent: some View {
+        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+            HStack(spacing: DroppySpacing.xsm) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 10, weight: .medium))
+                Text("Plane Tasks")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            Text("\(droplet.tasks.count)").font(.system(size: 26, weight: .semibold, design: .rounded))
+            Text("assigned tasks").font(.caption).foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var taskListScreen: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             HStack(spacing: DroppySpacing.xsm) {
                 Image(systemName: "checklist")
@@ -182,11 +225,7 @@ private struct PlaneTasksWidget: View {
                 .help("Refresh")
             }
             .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-            if context.isCompact {
-                Text("\(droplet.tasks.count)").font(.system(size: 26, weight: .semibold, design: .rounded))
-                Text("assigned tasks").font(.caption).foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-            } else {
-                switch droplet.state {
+            switch droplet.state {
                 case .needsSetup:
                     Text("Please configure your Plane workspace and token in settings.").font(.caption).foregroundStyle(.secondary)
                 case .loading:
@@ -231,26 +270,26 @@ private struct PlaneTasksWidget: View {
                     .onChange(of: droplet.searchText) { _, _ in
                         droplet.selectedTaskID = nil
                     }
-                    ScrollView(showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            ForEach(droplet.visibleTasks) { task in
-                                taskRow(task)
+                    GeometryReader { proxy in
+                        ScrollView(.vertical) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ScrollViewScrollerHider()
+                                    .frame(width: 0, height: 0)
+                                ForEach(droplet.visibleTasks) { task in
+                                    taskRow(task)
+                                }
+                                if droplet.visibleTasks.isEmpty { Text("No tasks match these filters.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
                             }
-                            if droplet.visibleTasks.isEmpty { Text("No tasks match these filters.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
+                            .frame(width: proxy.size.width, alignment: .leading)
                         }
-                    }.frame(maxHeight: droplet.selectedTask == nil ? 200 : 130)
-                    if let task = droplet.selectedTask { detailView(task) }
+                        .scrollIndicators(.hidden, axes: .vertical)
+                    }
+                    .frame(maxHeight: 200)
                 case .failed(let message):
                     Text(message).foregroundStyle(.red).font(.caption)
-                }
             }
             Spacer(minLength: 0)
         }
-        // Preserve the internal breathing room that was present in the earlier layout.
-        .padding(.horizontal, DroppySpacing.md)
-        .padding(.top, DroppySpacing.md)
-        .padding(context.contentInsets)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
     
     private var projectFilter: some View {
@@ -403,7 +442,9 @@ private struct PlaneTasksWidget: View {
                 if let dotColor {
                     Circle()
                         .fill(dotColor)
-                        .frame(width: 6, height: 6)
+                        .overlay(Circle().stroke(isSelected ? Color.black.opacity(0.9) : AdaptiveColors.notchSurfaceCardFill, lineWidth: 1.25))
+                        .frame(width: 7, height: 7)
+                        .shadow(color: isSelected ? AdaptiveColors.notchSurfaceCardFill.opacity(0.9) : .clear, radius: 1)
                 }
                 Text(label)
                     .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
@@ -428,66 +469,350 @@ private struct PlaneTasksWidget: View {
     }
     
     private func taskRow(_ task: PlaneTask) -> some View {
-        HStack(spacing: 6) {
-            Button { droplet.togglePin(task) } label: {
-                Image(systemName: droplet.pinnedIDs.contains(task.id) ? "pin.fill" : "pin")
-                    .foregroundStyle(droplet.pinnedIDs.contains(task.id) ? .yellow : .secondary)
-            }.buttonStyle(.plain).help("Pin locally")
-            Button { droplet.selectedTaskID = task.id == droplet.selectedTaskID ? nil : task.id } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Text(task.reference).font(.caption.monospaced()).foregroundStyle(.secondary)
+        Button {
+            showDetails(for: task)
+        } label: {
+            HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(task.reference.uppercased())
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                    if let date = formattedTargetDate(task.targetDate) {
+                        Circle().fill(AdaptiveColors.notchSurfaceTertiaryText.opacity(0.65)).frame(width: 3, height: 3)
                         HStack(spacing: 4) {
-                            Circle()
-                                .fill(groupColor(task.stateGroup))
-                                .frame(width: 5, height: 5)
-                            Text(task.status).font(.caption2)
+                            Image(systemName: "calendar").font(.system(size: 9, weight: .regular))
+                            Text(date).font(.system(size: 10, weight: .regular))
                         }
-                        .padding(.horizontal, 5).padding(.vertical, 2).background(.quaternary, in: Capsule())
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
                     }
-                    Text(task.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                Text(task.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    priorityChip(task.priority)
+                    stateChip(task)
+                    projectChip(task.project)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help("Show task details")
+    }
+
+    private func showCopiedFeedback(_ key: String) {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.68)) { copiedFeedback = key }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            withAnimation(.easeOut(duration: 0.2)) {
+                if copiedFeedback == key { copiedFeedback = nil }
+            }
+        }
+    }
+
+    private func formattedTargetDate(_ rawDate: String?) -> String? {
+        guard let rawDate, !rawDate.isEmpty else { return nil }
+        let input = ISO8601DateFormatter()
+        input.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = input.date(from: rawDate)
+            ?? ISO8601DateFormatter().date(from: rawDate)
+            ?? dateOnlyFormatter.date(from: String(rawDate.prefix(10)))
+        guard let date else { return rawDate }
+        return targetDateFormatter.string(from: date)
+    }
+
+    private var dateOnlyFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }
+
+    private var targetDateFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter
+    }
+
+    private func priorityChip(_ priority: String) -> some View {
+        let normalized = priority.lowercased()
+        let label: String = {
+            switch normalized {
+            case "urgent": return "Urgent"
+            case "high": return "High"
+            case "medium": return "Medium"
+            case "low": return "Low"
+            default: return "No priority"
+            }
+        }()
+        let tint: Color = {
+            switch normalized {
+            case "urgent": return .purple
+            case "high": return .red
+            case "medium": return .orange
+            case "low": return .green
+            default: return AdaptiveColors.notchSurfaceTertiaryText
+            }
+        }()
+        let filledBars: Int = {
+            switch normalized {
+            case "low": return 1
+            case "medium": return 2
+            case "high", "urgent": return 3
+            default: return 0
+            }
+        }()
+
+        return HStack(spacing: 5) {
+            HStack(alignment: .bottom, spacing: 1.5) {
+                ForEach(0..<3, id: \.self) { index in
+                    Capsule()
+                        .fill(index < filledBars ? tint : tint.opacity(0.22))
+                        .frame(width: 3, height: CGFloat(4 + index * 2))
+                }
+            }
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.13), in: Capsule(style: .continuous))
+        .help("Priority: \(label)")
+    }
+
+    private func stateChip(_ task: PlaneTask) -> some View {
+        let tint = groupColor(task.stateGroup)
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+            Text(task.status)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.13), in: Capsule(style: .continuous))
+        .help("State: \(task.status)")
+    }
+
+    private func projectChip(_ project: String) -> some View {
+        Text(project)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(AdaptiveColors.notchSurfaceCardFill.opacity(0.9), in: Capsule(style: .continuous))
+            .help("Project: \(project)")
+    }
+
+    private func detailScreen(_ task: PlaneTask) -> some View {
+        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+            HStack(spacing: DroppySpacing.xsm) {
+                Button {
+                    closeDetails()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                .help("Back to tasks")
+                .accessibilityLabel("Back to tasks")
+
+                Text("Plane Tasks")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
+                detailActionGroup(task)
+            }
+            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+
+            detailView(task)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func detailView(_ task: PlaneTask) -> some View {
+        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+            HStack(spacing: 6) {
+                Text(task.reference.uppercased())
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                if let date = formattedTargetDate(task.targetDate) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 8))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    Text(date)
+                        .font(.system(size: 9))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                 }
                 Spacer(minLength: 0)
-            }.buttonStyle(.plain).foregroundStyle(.primary)
-            Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(task.name, forType: .string) } label: { Image(systemName: "doc.on.doc") }
-                .buttonStyle(.plain).help("Copy title")
-            Link(destination: task.webURL) { Image(systemName: "arrow.up.right.square") }.help("Open in Plane")
-        }.padding(.vertical, 4)
-    }
-    private func detailView(_ task: PlaneTask) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Divider()
-            HStack {
-                Text(task.reference).font(.caption.monospaced()).foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    droplet.selectedTaskID = nil
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .help("Close details")
-                Button("Copy ID") {
-                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(task.reference, forType: .string)
-                }
-                .buttonStyle(.plain)
-                .font(.caption)
-                Button("Copy link") {
-                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(task.webURL.absoluteString, forType: .string)
-                }
-                .buttonStyle(.plain)
-                .font(.caption)
             }
-            Text(task.name).font(.system(size: 13, weight: .semibold))
-            Text("\(task.project) · \(task.status) · \(task.priority.capitalized)\(task.targetDate.map { " · Due \($0)" } ?? "")")
-                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                priorityChip(task.priority)
+                stateChip(task)
+                projectChip(task.project)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(task.name)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             if task.descriptionText.isEmpty {
-                Text("No description available.").font(.caption).foregroundStyle(.secondary)
+                Text("No description available.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
             } else {
-                ScrollView { Text(task.descriptionText).font(.system(size: 12)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    .frame(maxHeight: 90)
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ScrollViewScrollerHider()
+                            .frame(width: 0, height: 0)
+                        Text(task.descriptionText)
+                            .font(.system(size: 11))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 2)
+                    }
+                }
+                .scrollIndicators(.hidden, axes: .vertical)
+                .frame(maxHeight: .infinity)
             }
-        }.padding(.top, 3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func detailActionGroup(_ task: PlaneTask) -> some View {
+        HStack(spacing: 2) {
+            detailIconButton(
+                symbol: copiedFeedback == "detail-id-\(task.id)" ? "checkmark" : "doc.on.doc",
+                isCopied: copiedFeedback == "detail-id-\(task.id)",
+                help: "Copy ID",
+                action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(task.reference, forType: .string)
+                    showCopiedFeedback("detail-id-\(task.id)")
+                }
+            )
+            detailIconButton(
+                symbol: copiedFeedback == "detail-link-\(task.id)" ? "checkmark" : "link",
+                isCopied: copiedFeedback == "detail-link-\(task.id)",
+                help: "Copy link",
+                action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(task.webURL.absoluteString, forType: .string)
+                    showCopiedFeedback("detail-link-\(task.id)")
+                }
+            )
+        }
+        .padding(2)
+        .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
+    }
+
+    private func closeDetails() {
+        withAnimation(DroppyAnimation.panelSlide) {
+            isShowingDetail = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard !isShowingDetail else { return }
+            detailTask = nil
+            droplet.selectedTaskID = nil
+        }
+    }
+
+    /// `panelSlide` animates the position of an already-mounted panel. Mount
+    /// the detail page first at its offscreen position, then change the slide
+    /// state on the following run-loop turn. Mounting it and moving it in the
+    /// same transaction skips the starting position, which reads as a cut.
+    private func showDetails(for task: PlaneTask) {
+        withTransaction(Transaction(animation: nil)) {
+            detailTask = task
+            droplet.selectedTaskID = task.id
+            isShowingDetail = false
+        }
+
+        DispatchQueue.main.async {
+            withAnimation(DroppyAnimation.panelSlide) {
+                isShowingDetail = true
+            }
+        }
+    }
+
+    private func detailIconButton(
+        symbol: String,
+        isCopied: Bool = false,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .medium))
+                .contentTransition(.symbolEffect(.replace))
+                .foregroundStyle(isCopied ? Color.green : AdaptiveColors.notchSurfaceSecondaryText)
+                .frame(width: 23, height: 23)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+}
+
+
+/// Explicitly removes AppKit scrollbars from SwiftUI ScrollViews while
+/// preserving trackpad/mouse-wheel scrolling. SwiftUI's .scrollIndicators(.hidden)
+/// alone can still leave overlay scrollers visible in hosted macOS views.
+private struct ScrollViewScrollerHider: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.wantsLayer = false
+        DispatchQueue.main.async { hideEnclosingScrollers(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { hideEnclosingScrollers(from: nsView) }
+    }
+
+    private func hideEnclosingScrollers(from view: NSView) {
+        if let scrollView = view.enclosingScrollView {
+            hide(scrollView)
+            return
+        }
+        var ancestor = view.superview
+        while let current = ancestor {
+            if let scrollView = current as? NSScrollView {
+                hide(scrollView)
+                return
+            }
+            ancestor = current.superview
+        }
+    }
+
+    private func hide(_ scrollView: NSScrollView) {
+        scrollView.scrollerStyle = .overlay
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
     }
 }
 
