@@ -4,6 +4,7 @@ import DroppyKit
 import Foundation
 import Security
 import SwiftUI
+import WebKit
 
 @objc(PlaneTasksPrincipal)
 public final class PlaneTasksPrincipal: NSObject, DropletPrincipal {
@@ -21,13 +22,20 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     @Published fileprivate var selectedStatuses: Set<String> = []
     @Published fileprivate var searchText = ""
     @Published fileprivate var selectedTaskID: String?
+    @Published fileprivate var isRefreshing = false
+    @Published fileprivate var refreshRevision = 0
+    @Published fileprivate var refreshError: String?
     private var host: DropletHost?
     private var reloadTask: Task<Void, Never>?
     private let tokenStore = TokenStore(service: "app.getdroppy.plane-tasks")
     
     public func activate(host: DropletHost) throws { self.host = host; host.log.info("Plane Tasks activated"); refresh() }
     public func deactivate() { reloadTask?.cancel(); reloadTask = nil; host = nil }
-    public func refresh() { reloadTask?.cancel(); reloadTask = Task { [weak self] in await self?.loadTasks() } }
+    public func refresh() {
+        reloadTask?.cancel()
+        refreshRevision += 1
+        reloadTask = Task { [weak self] in await self?.loadTasks() }
+    }
 
     private var workspace: String { host?.preferences.value(forKey: "workspace", default: "").trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
     private var baseURL: String { (host?.preferences.value(forKey: "baseURL", default: "https://api.plane.so") ?? "https://api.plane.so").trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) }
@@ -70,15 +78,30 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
             && (selectedProject == "All" || task.project == selectedProject)
             && (searchText.isEmpty || task.name.localizedCaseInsensitiveContains(searchText) || task.reference.localizedCaseInsensitiveContains(searchText) || task.project.localizedCaseInsensitiveContains(searchText))
         }.sorted {
-            ($0.targetDate ?? "9999-12-31", $0.name) < ($1.targetDate ?? "9999-12-31", $1.name)
+            Self.parseDate($0.createdAt) > Self.parseDate($1.createdAt)
         }
+    }
+
+    /// Parses a Plane API timestamp for sorting. Tasks with no parseable
+    /// date sort to the very end rather than the very front.
+    private static func parseDate(_ raw: String?) -> Date {
+        guard let raw, !raw.isEmpty else { return .distantPast }
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: raw) { return date }
+        if let date = ISO8601DateFormatter().date(from: raw) { return date }
+        return .distantPast
     }
     fileprivate var selectedTask: PlaneTask? { tasks.first { $0.id == selectedTaskID } }
 
     private func loadTasks() async {
         guard !workspace.isEmpty, let token = tokenStore.read(), !token.isEmpty else { state = .needsSetup; tasks = []; return }
         guard let base = URL(string: baseURL) else { state = .failed("The Plane URL is invalid."); return }
-        state = .loading
+        let keepsCurrentTasks = !tasks.isEmpty
+        isRefreshing = keepsCurrentTasks
+        refreshError = nil
+        if !keepsCurrentTasks { state = .loading }
+        defer { isRefreshing = false }
         do {
             let webBaseURL = base.host == "api.plane.so" ? URL(string: "https://app.plane.so")! : base
             let client = PlaneClient(baseURL: base, webBaseURL: webBaseURL, workspace: workspace, token: token)
@@ -92,7 +115,16 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
             state = .loaded
             host?.log.info("Plane Tasks loaded \(tasks.count) assigned tasks")
         } catch is CancellationError { return
-        } catch { tasks = []; state = .failed(error.localizedDescription); host?.log.error("Plane Tasks request failed: \(error.localizedDescription)") }
+        } catch {
+            if keepsCurrentTasks {
+                refreshError = error.localizedDescription
+                state = .loaded
+            } else {
+                tasks = []
+                state = .failed(error.localizedDescription)
+            }
+            host?.log.error("Plane Tasks request failed: \(error.localizedDescription)")
+        }
     }
 
     var workspaceBinding: Binding<String> {
@@ -157,6 +189,7 @@ private struct PlaneTasksWidget: View {
     @State private var copiedFeedback: String? = nil
     @State private var detailTask: PlaneTask?
     @State private var isShowingDetail = false
+    @State private var isInitialLoading = false
 
     var body: some View {
         Group {
@@ -219,9 +252,19 @@ private struct PlaneTasksWidget: View {
                     .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
                 Spacer(minLength: 0)
                 Button { droplet.refresh() } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Group {
+                        if droplet.isRefreshing {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                    }
+                    .frame(width: 20, height: 20)
                 }
                 .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                .disabled(droplet.isRefreshing)
                 .help("Refresh")
             }
             .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
@@ -229,11 +272,17 @@ private struct PlaneTasksWidget: View {
                 case .needsSetup:
                     Text("Please configure your Plane workspace and token in settings.").font(.caption).foregroundStyle(.secondary)
                 case .loading:
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .padding()
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(0..<4, id: \.self) { index in
+                            taskSkeletonRow(index: index)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 case .loaded:
                     VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                        if let message = droplet.refreshError {
+                            errorBox(message)
+                        }
                         HStack(spacing: DroppySpacing.xsm) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 12, weight: .medium))
@@ -278,7 +327,7 @@ private struct PlaneTasksWidget: View {
                                 ForEach(droplet.visibleTasks) { task in
                                     taskRow(task)
                                 }
-                                if droplet.visibleTasks.isEmpty { Text("No tasks match these filters.").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8) }
+                                if droplet.visibleTasks.isEmpty { emptyState }
                             }
                             .frame(width: proxy.size.width, alignment: .leading)
                         }
@@ -286,7 +335,7 @@ private struct PlaneTasksWidget: View {
                     }
                     .frame(maxHeight: 200)
                 case .failed(let message):
-                    Text(message).foregroundStyle(.red).font(.caption)
+                    errorBox(message)
             }
             Spacer(minLength: 0)
         }
@@ -468,70 +517,218 @@ private struct PlaneTasksWidget: View {
         .help(isSelected ? "Selected" : "Filter by \(label)")
     }
     
-    private func taskRow(_ task: PlaneTask) -> some View {
-        Button {
-            showDetails(for: task)
-        } label: {
-            HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text(task.reference.uppercased())
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        .lineLimit(1)
-                    if let date = formattedTargetDate(task.targetDate) {
-                        Circle().fill(AdaptiveColors.notchSurfaceTertiaryText.opacity(0.65)).frame(width: 3, height: 3)
-                        HStack(spacing: 4) {
-                            Image(systemName: "calendar").font(.system(size: 9, weight: .regular))
-                            Text(date).font(.system(size: 10, weight: .regular))
-                        }
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                }
-                Text(task.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 6) {
-                    priorityChip(task.priority)
-                    stateChip(task)
-                    projectChip(task.project)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Spacer(minLength: 0)
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "tray")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            Text("No tasks match these filters")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            Text("Try a different status, project, or search term.")
+                .font(.system(size: 10))
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                .multilineTextAlignment(.center)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .padding(.horizontal, 16)
+        .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
+    }
+
+    private func taskRow(_ task: PlaneTask) -> some View {
+        ZStack(alignment: .trailing) {
+            Button {
+                showDetails(for: task)
+            } label: {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text(task.reference.uppercased())
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                                .lineLimit(1)
+
+                            if let date = formattedTargetDate(task.targetDate) {
+                                Circle()
+                                    .fill(AdaptiveColors.notchSurfaceTertiaryText.opacity(0.65))
+                                    .frame(width: 3, height: 3)
+
+                                HStack(spacing: 4) {
+                                    Image(systemName: "calendar")
+                                        .font(.system(size: 9, weight: .regular))
+                                    Text(date)
+                                        .font(.system(size: 10, weight: .regular))
+                                }
+                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                                .lineLimit(1)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+
+                        Text(task.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        HStack(spacing: 6) {
+                            priorityChip(task.priority)
+                            stateChip(task)
+                            projectChip(task.project)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    Spacer(minLength: 26)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help("Show task details")
+
+            copyRowButton(task)
+                .padding(.trailing, 10)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            AdaptiveColors.notchSurfaceCardFill,
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+    }
+
+    private func taskSkeletonRow(index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .frame(width: index.isMultiple(of: 2) ? 42 : 52, height: 7)
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .frame(width: 62, height: 7)
+                Spacer(minLength: 0)
+            }
+
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .frame(width: index == 1 ? 220 : 180, height: 10)
+
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
+                    .frame(width: 46, height: 16)
+                RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
+                    .frame(width: index == 2 ? 88 : 74, height: 16)
+                RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
+                    .frame(width: 72, height: 16)
+            }
+        }
+        .foregroundStyle(AdaptiveColors.notchSurfaceCardFill)
+        .redacted(reason: .placeholder)
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .background(
+            AdaptiveColors.notchSurfaceCardFill.opacity(0.55),
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .opacity(0.72)
+    }
+
+    private func copyRowButton(_ task: PlaneTask) -> some View {
+        Button {
+            copyToPasteboard(task.reference, feedbackKey: "row-id-\(task.id)")
+        } label: {
+            Image(systemName: copiedFeedback == "row-id-\(task.id)" ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 9.5, weight: .medium))
+                .contentTransition(.symbolEffect(.replace))
+                .foregroundStyle(
+                    copiedFeedback == "row-id-\(task.id)"
+                        ? Color.green
+                        : AdaptiveColors.notchSurfaceSecondaryText
+                )
         }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .help("Show task details")
+        .buttonStyle(DroppyCircleButtonStyle(size: 20))
+        .help(copiedFeedback == "row-id-\(task.id)" ? "Copied" : "Copy task ID")
+        .accessibilityLabel("Copy task ID")
     }
 
     private func showCopiedFeedback(_ key: String) {
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.68)) { copiedFeedback = key }
+        withAnimation(DroppyAnimation.bounce) {
+            copiedFeedback = key
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
             withAnimation(.easeOut(duration: 0.2)) {
-                if copiedFeedback == key { copiedFeedback = nil }
+                if copiedFeedback == key {
+                    copiedFeedback = nil
+                }
             }
         }
+    }
+
+    private func copyToPasteboard(_ value: String, feedbackKey: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        showCopiedFeedback(feedbackKey)
+    }
+
+    private func errorBox(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: DroppySpacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.orange)
+                .frame(width: 18, height: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Couldn’t load Plane")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                droplet.refresh()
+            } label: {
+                Image(systemName: droplet.isRefreshing ? "arrow.clockwise" : "arrow.clockwise")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .buttonStyle(DroppyCircleButtonStyle(size: 18))
+            .disabled(droplet.isRefreshing)
+            .help("Try again")
+        }
+        .padding(DroppySpacing.sm)
+        .background(
+            Color.orange.opacity(0.10),
+            in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
+                .stroke(Color.orange.opacity(0.22), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Couldn’t load Plane: \(message)")
     }
 
     private func formattedTargetDate(_ rawDate: String?) -> String? {
         guard let rawDate, !rawDate.isEmpty else { return nil }
+
         let input = ISO8601DateFormatter()
         input.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
         let date = input.date(from: rawDate)
             ?? ISO8601DateFormatter().date(from: rawDate)
             ?? dateOnlyFormatter.date(from: String(rawDate.prefix(10)))
+
         guard let date else { return rawDate }
         return targetDateFormatter.string(from: date)
     }
@@ -553,6 +750,7 @@ private struct PlaneTasksWidget: View {
 
     private func priorityChip(_ priority: String) -> some View {
         let normalized = priority.lowercased()
+
         let label: String = {
             switch normalized {
             case "urgent": return "Urgent"
@@ -562,6 +760,7 @@ private struct PlaneTasksWidget: View {
             default: return "No priority"
             }
         }()
+
         let tint: Color = {
             switch normalized {
             case "urgent": return .purple
@@ -571,6 +770,7 @@ private struct PlaneTasksWidget: View {
             default: return AdaptiveColors.notchSurfaceTertiaryText
             }
         }()
+
         let filledBars: Int = {
             switch normalized {
             case "low": return 1
@@ -588,6 +788,7 @@ private struct PlaneTasksWidget: View {
                         .frame(width: 3, height: CGFloat(4 + index * 2))
                 }
             }
+
             Text(label)
                 .font(.system(size: 10, weight: .medium))
                 .lineLimit(1)
@@ -601,18 +802,23 @@ private struct PlaneTasksWidget: View {
 
     private func stateChip(_ task: PlaneTask) -> some View {
         let tint = groupColor(task.stateGroup)
+
         return HStack(spacing: 4) {
             Circle()
                 .fill(tint)
                 .frame(width: 5, height: 5)
+
             Text(task.status)
                 .font(.system(size: 10, weight: .medium))
                 .lineLimit(1)
         }
-        .foregroundStyle(tint)
+        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
-        .background(tint.opacity(0.13), in: Capsule(style: .continuous))
+        .background(
+            AdaptiveColors.notchSurfaceCardFill.opacity(0.9),
+            in: Capsule(style: .continuous)
+        )
         .help("State: \(task.status)")
     }
 
@@ -655,7 +861,7 @@ private struct PlaneTasksWidget: View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             HStack(spacing: 6) {
                 Text(task.reference.uppercased())
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                 if let date = formattedTargetDate(task.targetDate) {
                     Image(systemName: "calendar")
@@ -674,7 +880,7 @@ private struct PlaneTasksWidget: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(task.name)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -683,27 +889,341 @@ private struct PlaneTasksWidget: View {
                     .font(.system(size: 10))
                     .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
             } else {
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ScrollViewScrollerHider()
-                            .frame(width: 0, height: 0)
-                        Text(task.descriptionText)
-                            .font(.system(size: 11))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 2)
-                            .padding(.vertical, 2)
-                    }
-                }
-                .scrollIndicators(.hidden, axes: .vertical)
-                .frame(maxHeight: .infinity)
+                RichDescriptionView(
+                    html: task.descriptionHTML,
+                    fallbackText: task.descriptionText
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Plane stores descriptions as HTML. AppKit's NSTextView is used here
+    /// instead of a browser view so rich text is laid out by native macOS
+    /// text rendering: wrapping, lists, emphasis, links, code and tables.
+    /// Plane stores the description as Tiptap HTML. Use WebKit here because
+    /// Plane itself renders this same HTML model in a browser/editor. This
+    /// keeps headings, paragraphs, emphasis, links, lists, checklists, tables,
+    /// code, images and text alignment instead of flattening them through an
+    /// attributed-string HTML importer.
+    private struct RichDescriptionView: NSViewRepresentable {
+        let html: String?
+        let fallbackText: String
+
+        func makeNSView(context: Context) -> WKWebView {
+            let configuration = WKWebViewConfiguration()
+            configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+
+            let webView = WKWebView(frame: .zero, configuration: configuration)
+            webView.setValue(false, forKey: "drawsBackground")
+            webView.allowsMagnification = false
+            webView.navigationDelegate = context.coordinator
+            webView.layer?.backgroundColor = NSColor.clear.cgColor
+            return webView
+        }
+
+        func updateNSView(_ webView: WKWebView, context: Context) {
+            let source = html?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let body = source.isEmpty ? fallbackText : source
+            let document = Self.document(body: body)
+
+            guard context.coordinator.lastDocument != document else { return }
+            context.coordinator.lastDocument = document
+            webView.loadHTMLString(document, baseURL: nil)
+        }
+
+        func makeCoordinator() -> Coordinator {
+            Coordinator()
+        }
+
+        private static func escapeHTML(_ value: String) -> String {
+            value
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+                .replacingOccurrences(of: "'", with: "&#39;")
+        }
+
+        private static func document(body: String) -> String {
+            let renderedBody: String
+
+            if body.contains("<") && body.contains(">") {
+                renderedBody = body
+            } else {
+                renderedBody = escapeHTML(body).replacingOccurrences(of: "\n", with: "<br>")
+            }
+
+            return """
+            <!doctype html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+              <style>
+                :root {
+                  color-scheme: dark;
+                  --text: rgba(255,255,255,.86);
+                  --heading: rgba(255,255,255,.96);
+                  --muted: rgba(255,255,255,.62);
+                  --link: #5AA7FF;
+                  --code: rgba(255,255,255,.07);
+                  --border: rgba(255,255,255,.11);
+                  --checkbox: #5AA7FF;
+                }
+
+                * { box-sizing: border-box; }
+
+                html, body {
+                  margin: 0;
+                  padding: 0;
+                  background: transparent;
+                  color: var(--text);
+                  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+                  font-size: 12px;
+                  line-height: 1.5;
+                  overflow-x: hidden;
+                  overflow-y: auto;
+                  -webkit-font-smoothing: antialiased;
+                }
+
+                body {
+                  padding: 2px 2px 10px;
+                  overflow-wrap: anywhere;
+                  word-break: break-word;
+                }
+
+                ::-webkit-scrollbar { width: 0; height: 0; }
+                ::-webkit-scrollbar-thumb,
+                ::-webkit-scrollbar-track { background: transparent; }
+
+                p { margin: 0 0 9px; }
+                p:last-child { margin-bottom: 0; }
+
+                h1, h2, h3, h4, h5, h6 {
+                  color: var(--heading);
+                  line-height: 1.25;
+                  font-weight: 700;
+                  margin: 14px 0 7px;
+                }
+                h1:first-child, h2:first-child, h3:first-child,
+                h4:first-child, h5:first-child, h6:first-child {
+                  margin-top: 2px;
+                }
+                h1 { font-size: 20px; }
+                h2 { font-size: 17px; }
+                h3 { font-size: 14px; }
+                h4 { font-size: 13px; }
+                h5, h6 { font-size: 12px; }
+
+                strong, b { color: var(--heading); font-weight: 700; }
+                em, i { font-style: italic; }
+                u { text-decoration: underline; }
+                s, del { opacity: .65; }
+
+                a {
+                  color: var(--link);
+                  text-decoration: underline;
+                  text-decoration-thickness: .5px;
+                  text-underline-offset: 2px;
+                }
+
+                /* Plane/Tiptap normal lists. */
+                ul:not([data-type="taskList"]),
+                ol {
+                  margin: 5px 0 10px;
+                  padding-left: 22px;
+                }
+                ul:not([data-type="taskList"]) li,
+                ol li {
+                  margin: 3px 0;
+                  padding-left: 2px;
+                }
+                ul:not([data-type="taskList"]) ul,
+                ul:not([data-type="taskList"]) ol,
+                ol ul,
+                ol ol {
+                  margin-top: 3px;
+                  margin-bottom: 3px;
+                }
+
+                /* Plane/Tiptap checklists: NEVER give task items a list marker. */
+                ul[data-type="taskList"] {
+                  list-style: none !important;
+                  margin: 5px 0 10px !important;
+                  padding: 0 !important;
+                }
+
+                ul[data-type="taskList"] > li[data-type="taskItem"],
+                li[data-type="taskItem"] {
+                  list-style: none !important;
+                  display: flex;
+                  align-items: flex-start;
+                  gap: 6px;
+                  margin: 4px 0;
+                  padding: 0 !important;
+                }
+
+                li[data-type="taskItem"]::marker,
+                ul[data-type="taskList"] > li::marker {
+                  content: "" !important;
+                  font-size: 0 !important;
+                }
+
+                li[data-type="taskItem"] > label {
+                  flex: 0 0 auto;
+                  display: flex;
+                  align-items: center;
+                  margin-top: 2px;
+                }
+
+                li[data-type="taskItem"] > label > input[type="checkbox"] {
+                  appearance: none;
+                  -webkit-appearance: none;
+                  width: 13px;
+                  height: 13px;
+                  margin: 0;
+                  border: 1.5px solid rgba(255,255,255,.38);
+                  border-radius: 3px;
+                  background: transparent;
+                  position: relative;
+                }
+
+                li[data-type="taskItem"] > label > input[type="checkbox"]:checked {
+                  background: var(--checkbox);
+                  border-color: var(--checkbox);
+                }
+
+                li[data-type="taskItem"] > label > input[type="checkbox"]:checked::after {
+                  content: "";
+                  position: absolute;
+                  left: 3px;
+                  top: 0px;
+                  width: 4px;
+                  height: 8px;
+                  border: solid white;
+                  border-width: 0 1.5px 1.5px 0;
+                  transform: rotate(45deg);
+                }
+
+                li[data-type="taskItem"] > div {
+                  flex: 1 1 auto;
+                  min-width: 0;
+                }
+
+                li[data-type="taskItem"] > div > p:last-child {
+                  margin-bottom: 0;
+                }
+
+                /* Nested task lists remain checklists, never bullets. */
+                li[data-type="taskItem"] ul[data-type="taskList"] {
+                  margin: 4px 0 4px 0 !important;
+                  padding-left: 0 !important;
+                }
+
+                blockquote {
+                  margin: 9px 0;
+                  padding: 7px 10px;
+                  border-left: 3px solid rgba(255,255,255,.22);
+                  color: var(--muted);
+                  background: rgba(255,255,255,.035);
+                  border-radius: 4px;
+                }
+
+                pre {
+                  margin: 9px 0;
+                  padding: 9px 10px;
+                  background: var(--code);
+                  border-radius: 7px;
+                  overflow-x: auto;
+                  white-space: pre-wrap;
+                  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+                }
+
+                code {
+                  padding: 1px 4px;
+                  border-radius: 4px;
+                  background: var(--code);
+                  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+                }
+                pre code { padding: 0; background: transparent; }
+
+                hr {
+                  border: 0;
+                  border-top: 1px solid var(--border);
+                  margin: 12px 0;
+                }
+
+                table {
+                  width: 100%;
+                  border-collapse: collapse;
+                  margin: 9px 0 12px;
+                  font-size: 11px;
+                }
+                th, td {
+                  border: 1px solid var(--border);
+                  padding: 6px 7px;
+                  text-align: left;
+                  vertical-align: top;
+                }
+                th {
+                  color: rgba(255,255,255,.94);
+                  background: rgba(255,255,255,.055);
+                  font-weight: 650;
+                }
+
+                img {
+                  display: block;
+                  max-width: 100%;
+                  height: auto;
+                  border-radius: 7px;
+                }
+
+                [style*="text-align: center"] { text-align: center !important; }
+                [style*="text-align: right"] { text-align: right !important; }
+                [style*="text-align: justify"] { text-align: justify !important; }
+
+                mark {
+                  background: rgba(255, 210, 60, .35);
+                  color: inherit;
+                  border-radius: 2px;
+                }
+
+                .mention {
+                  color: var(--link);
+                }
+              </style>
+            </head>
+            <body>
+              \(renderedBody)
+            </body>
+            </html>
+            """
+        }
+
+        @MainActor
+        final class Coordinator: NSObject, WKNavigationDelegate {
+            var lastDocument = ""
+
+            func webView(
+                _ webView: WKWebView,
+                decidePolicyFor navigationAction: WKNavigationAction,
+                decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+            ) {
+                if navigationAction.navigationType == .linkActivated,
+                   let url = navigationAction.request.url {
+                    NSWorkspace.shared.open(url)
+                    decisionHandler(.cancel)
+                } else {
+                    decisionHandler(.allow)
+                }
+            }
+        }
+    }
+
     private func detailActionGroup(_ task: PlaneTask) -> some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 6) {
             detailIconButton(
                 symbol: copiedFeedback == "detail-id-\(task.id)" ? "checkmark" : "doc.on.doc",
                 isCopied: copiedFeedback == "detail-id-\(task.id)",
@@ -724,9 +1244,14 @@ private struct PlaneTasksWidget: View {
                     showCopiedFeedback("detail-link-\(task.id)")
                 }
             )
+            detailIconButton(
+                symbol: "arrow.up.forward.app",
+                help: "Open in browser",
+                action: {
+                    NSWorkspace.shared.open(task.webURL)
+                }
+            )
         }
-        .padding(2)
-        .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
     }
 
     private func closeDetails() {
@@ -766,12 +1291,10 @@ private struct PlaneTasksWidget: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 9, weight: .medium))
                 .contentTransition(.symbolEffect(.replace))
                 .foregroundStyle(isCopied ? Color.green : AdaptiveColors.notchSurfaceSecondaryText)
-                .frame(width: 23, height: 23)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DroppyCircleButtonStyle(size: 20))
         .help(help)
     }
 
@@ -1028,6 +1551,7 @@ private struct PlaneWorkItem: Decodable {
     let priority: String?
     let sequenceID: Int
     let targetDate: String?
+    let createdAt: String?
     let state: PlaneState?
     let stateID: String?
     let assigneeIDs: [String]
@@ -1037,6 +1561,7 @@ private struct PlaneWorkItem: Decodable {
         case descriptionHTML = "description_html"
         case sequenceID = "sequence_id"
         case targetDate = "target_date"
+        case createdAt = "created_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -1051,6 +1576,7 @@ private struct PlaneWorkItem: Decodable {
         priority = try? container.decodeIfPresent(String.self, forKey: .priority)
         sequenceID = (try? container.decode(Int.self, forKey: .sequenceID)) ?? 0
         targetDate = try? container.decodeIfPresent(String.self, forKey: .targetDate)
+        createdAt = try? container.decodeIfPresent(String.self, forKey: .createdAt)
         state = try? container.decodeIfPresent(PlaneState.self, forKey: .state)
         stateID = (try? container.decodeIfPresent(String.self, forKey: .state)) ?? state?.id
 
@@ -1088,8 +1614,8 @@ private struct PlanePage<Value: Decodable>: Decodable {
     private enum CodingKeys: String, CodingKey { case results, data }
 }
 fileprivate struct PlaneTask: Identifiable {
-    let id: String; let name: String; let reference: String; let targetDate: String?
-    let priority: String; let status: String; let stateGroup: String; let descriptionText: String
+    let id: String; let name: String; let reference: String; let targetDate: String?; let createdAt: String?
+    let priority: String; let status: String; let stateGroup: String; let descriptionText: String; let descriptionHTML: String?
     let project: String; let webURL: URL
     var priorityColor: Color { switch priority { case "urgent": .red; case "high": .orange; case "medium": .yellow; default: .secondary } }
 }
@@ -1121,8 +1647,8 @@ private struct PlaneClient: Sendable {
             guard let url = URL(string: "/\(workspace)/browse/\(reference)", relativeTo: webBaseURL) else { return nil }
             let rawDescription = item.descriptionHTML ?? item.description ?? ""
             let plainDescription = rawDescription
-                .replacingOccurrences(of: "(?i)<br\\s*/?>", with: "\\n", options: .regularExpression)
-                .replacingOccurrences(of: "(?i)</p>|</div>|</li>", with: "\\n", options: .regularExpression)
+                .replacingOccurrences(of: "(?i)<br\\s*/?>", with: "\n", options: .regularExpression)
+                .replacingOccurrences(of: "(?i)</p>|</div>|</li>", with: "\n", options: .regularExpression)
                 .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
                 .replacingOccurrences(of: "&nbsp;", with: " ")
                 .replacingOccurrences(of: "&amp;", with: "&")
@@ -1130,9 +1656,9 @@ private struct PlaneClient: Sendable {
                 .replacingOccurrences(of: "&gt;", with: ">")
                 .replacingOccurrences(of: "&quot;", with: "\"")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return PlaneTask(id: item.id, name: item.name, reference: reference, targetDate: item.targetDate,
+            return PlaneTask(id: item.id, name: item.name, reference: reference, targetDate: item.targetDate, createdAt: item.createdAt,
                              priority: item.priority ?? "none", status: resolvedStatus ?? "Unknown",
-                             stateGroup: resolvedGroup, descriptionText: plainDescription,
+                             stateGroup: resolvedGroup, descriptionText: plainDescription, descriptionHTML: item.descriptionHTML,
                              project: Self.projectDisplayName(project), webURL: url)
         }
     }
