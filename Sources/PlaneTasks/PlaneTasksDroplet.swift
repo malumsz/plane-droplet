@@ -25,15 +25,20 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     @Published fileprivate var isRefreshing = false
     @Published fileprivate var refreshRevision = 0
     @Published fileprivate var refreshError: String?
+    @Published fileprivate var listTab: ListTab = .all
+    @Published fileprivate var pinnedIDs: Set<String> = []
     private var host: DropletHost?
     private var reloadTask: Task<Void, Never>?
     private let tokenStore = TokenStore(service: "app.getdroppy.plane-tasks")
     
-    public func activate(host: DropletHost) throws { self.host = host; host.log.info("Plane Tasks activated"); refresh() }
+    public func activate(host: DropletHost) throws { self.host = host; host.log.info("Plane Tasks activated"); loadPins(); refresh() }
     public func deactivate() { reloadTask?.cancel(); reloadTask = nil; host = nil }
     public func refresh() {
         reloadTask?.cancel()
         refreshRevision += 1
+        // Show the skeleton on the very first frame instead of waiting for the
+        // task below to get its first turn on the main actor.
+        if tasks.isEmpty && isConfigured { state = .loading }
         reloadTask = Task { [weak self] in await self?.loadTasks() }
     }
 
@@ -70,27 +75,70 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
         }
     }
     fileprivate var projects: [String] { ["All"] + Array(Set(tasks.map(\.project).filter { !$0.isEmpty })).sorted() }
+    /// `tasks` is sorted (newest first) once when it loads, so this only
+    /// filters. It runs several times per render, so it must stay cheap.
     fileprivate var visibleTasks: [PlaneTask] {
         tasks.filter { task in
+            let matchesSearch = searchText.isEmpty
+                || task.name.localizedCaseInsensitiveContains(searchText)
+                || task.reference.localizedCaseInsensitiveContains(searchText)
+                || task.project.localizedCaseInsensitiveContains(searchText)
+            // The Pinned tab ignores project and status on purpose.
+            if listTab == .pinned { return pinnedIDs.contains(task.id) && matchesSearch }
             let statusMatches = selectedStatuses.isEmpty
                 || (selectedProject == "All" ? selectedStatuses.contains(task.stateGroup) : selectedStatuses.contains(task.status))
-            return statusMatches
-            && (selectedProject == "All" || task.project == selectedProject)
-            && (searchText.isEmpty || task.name.localizedCaseInsensitiveContains(searchText) || task.reference.localizedCaseInsensitiveContains(searchText) || task.project.localizedCaseInsensitiveContains(searchText))
-        }.sorted {
-            Self.parseDate($0.createdAt) > Self.parseDate($1.createdAt)
+            return statusMatches && (selectedProject == "All" || task.project == selectedProject) && matchesSearch
         }
     }
+
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let isoPlain = ISO8601DateFormatter()
 
     /// Parses a Plane API timestamp for sorting. Tasks with no parseable
     /// date sort to the very end rather than the very front.
     private static func parseDate(_ raw: String?) -> Date {
         guard let raw, !raw.isEmpty else { return .distantPast }
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: raw) { return date }
-        if let date = ISO8601DateFormatter().date(from: raw) { return date }
-        return .distantPast
+        return isoWithFraction.date(from: raw) ?? isoPlain.date(from: raw) ?? .distantPast
+    }
+
+    // MARK: Pins
+
+    private func loadPins() {
+        let raw = host?.preferences.value(forKey: "pinnedTaskIDs", default: "") ?? ""
+        if let data = raw.data(using: .utf8), let ids = try? JSONDecoder().decode([String].self, from: data) {
+            pinnedIDs = Set(ids)
+        }
+    }
+
+    fileprivate func togglePin(_ task: PlaneTask) {
+        if pinnedIDs.contains(task.id) { pinnedIDs.remove(task.id) } else { pinnedIDs.insert(task.id) }
+        if let data = try? JSONEncoder().encode(pinnedIDs.sorted()), let json = String(data: data, encoding: .utf8) {
+            host?.preferences.setValue(json, forKey: "pinnedTaskIDs")
+        }
+    }
+
+    /// What the settings status chip shows. It reflects the last real request,
+    /// not just "both fields are filled in".
+    fileprivate var connectionStatus: ConnectionStatus {
+        guard isConfigured else { return .needsSetup }
+        if isRefreshing || state == .loading || state == .needsSetup { return .checking }
+        if let refreshError { return .failed(refreshError) }
+        if case .failed(let message) = state { return .failed(message) }
+        return .connected
+    }
+
+    /// Called whenever workspace, URL or token changes: drop stale data and
+    /// re-check, so the status chip never keeps saying "Ready" for old credentials.
+    fileprivate func credentialsChanged() {
+        settingsRevision += 1
+        tasks = []
+        selectedTaskID = nil
+        refreshError = nil
+        refresh()
     }
     fileprivate var selectedTask: PlaneTask? { tasks.first { $0.id == selectedTaskID } }
 
@@ -111,10 +159,15 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
                 for project in projects { group.addTask { try await client.tasks(in: project, assignedTo: currentUser.id) } }
                 var all: [PlaneTask] = []; for try await list in group { all += list }; return all
             }
+            // Sort once here (newest first) instead of on every render.
             tasks = lists
+                .map { ($0, Self.parseDate($0.createdAt)) }
+                .sorted { $0.1 > $1.1 }
+                .map(\.0)
             state = .loaded
             host?.log.info("Plane Tasks loaded \(tasks.count) assigned tasks")
         } catch is CancellationError { return
+        } catch let error as URLError where error.code == .cancelled { return
         } catch {
             if keepsCurrentTasks {
                 refreshError = error.localizedDescription
@@ -132,7 +185,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
             get: { self.workspace },
             set: {
                 self.host?.preferences.setValue($0, forKey: "workspace")
-                self.settingsRevision += 1
+                self.credentialsChanged()
             }
         )
     }
@@ -142,7 +195,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
             get: { self.baseURL },
             set: {
                 self.host?.preferences.setValue($0, forKey: "baseURL")
-                self.settingsRevision += 1
+                self.credentialsChanged()
             }
         )
     }
@@ -152,7 +205,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
             get: { self.tokenStore.read() ?? "" },
             set: {
                 self.tokenStore.write($0)
-                self.settingsRevision += 1
+                self.credentialsChanged()
             }
         )
     }
@@ -221,6 +274,13 @@ private struct PlaneTasksWidget: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// Animating the state change makes the filters fade out and the list
+    /// glide up, instead of the layout snapping.
+    private func setTab(_ tab: ListTab) {
+        guard droplet.listTab != tab else { return }
+        withAnimation(.snappy(duration: 0.3)) { droplet.listTab = tab }
+    }
+
     private var compactContent: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             HStack(spacing: DroppySpacing.xsm) {
@@ -251,6 +311,10 @@ private struct PlaneTasksWidget: View {
                     .padding(.vertical, 2)
                     .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
                 Spacer(minLength: 0)
+                HStack(spacing: DroppySpacing.xsm) {
+                    chip(label: "All", isSelected: droplet.listTab == .all) { setTab(.all) }
+                    chip(label: "Pinned", isSelected: droplet.listTab == .pinned) { setTab(.pinned) }
+                }
                 Button { droplet.refresh() } label: {
                     Group {
                         if droplet.isRefreshing {
@@ -270,14 +334,24 @@ private struct PlaneTasksWidget: View {
             .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
             switch droplet.state {
                 case .needsSetup:
-                    Text("Please configure your Plane workspace and token in settings.").font(.caption).foregroundStyle(.secondary)
+                    infoBox(
+                        icon: "info.circle.fill",
+                        tint: .blue,
+                        title: "Connect your Plane workspace",
+                        message: "Add your workspace slug and a personal access token in settings to see the tasks assigned to you.",
+                        actionTitle: "Open settings",
+                        action: { droplet.openSettings() }
+                    )
                 case .loading:
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(0..<4, id: \.self) { index in
                             taskSkeletonRow(index: index)
                         }
                     }
+                    .shimmering()
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Loading tasks")
                 case .loaded:
                     VStack(alignment: .leading, spacing: DroppySpacing.sm) {
                         if let message = droplet.refreshError {
@@ -310,24 +384,37 @@ private struct PlaneTasksWidget: View {
                             in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
                         )
 
-                        HStack(alignment: .center, spacing: DroppySpacing.sm) {
-                            statusChips
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            projectFilter
+                        // The Pinned tab ignores project and status, so the filters hide there.
+                        if droplet.listTab == .all {
+                            HStack(alignment: .center, spacing: DroppySpacing.sm) {
+                                statusChips
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                projectFilter
+                            }
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
                     .onChange(of: droplet.searchText) { _, _ in
                         droplet.selectedTaskID = nil
                     }
                     GeometryReader { proxy in
+                        let visible = droplet.visibleTasks
                         ScrollView(.vertical) {
-                            VStack(alignment: .leading, spacing: 6) {
+                            LazyVStack(alignment: .leading, spacing: 6) {
                                 ScrollViewScrollerHider()
                                     .frame(width: 0, height: 0)
-                                ForEach(droplet.visibleTasks) { task in
+                                ForEach(visible) { task in
                                     taskRow(task)
                                 }
-                                if droplet.visibleTasks.isEmpty { emptyState }
+                                if visible.isEmpty {
+                                    if droplet.listTab == .pinned && droplet.searchText.isEmpty {
+                                        emptyState(icon: "pin.slash", title: "No pinned tasks", message: "Use the pin button on a task to keep it here.")
+                                    } else if droplet.listTab == .pinned {
+                                        emptyState(icon: "magnifyingglass", title: "No pinned tasks match", message: "Try a different search term.")
+                                    } else {
+                                        emptyState(icon: "tray", title: "No tasks match these filters", message: "Try a different status, project, or search term.")
+                                    }
+                                }
                             }
                             .frame(width: proxy.size.width, alignment: .leading)
                         }
@@ -517,23 +604,63 @@ private struct PlaneTasksWidget: View {
         .help(isSelected ? "Selected" : "Filter by \(label)")
     }
     
-    private var emptyState: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "tray")
-                .font(.system(size: 20, weight: .regular))
+    /// Centered empty state, like a native "content unavailable" view:
+    /// hierarchical SF Symbol, short title, one line of guidance, on a flat
+    /// raised tile (no outline, no gradient).
+    private func emptyState(icon: String, title: String, message: String) -> some View {
+        VStack(spacing: DroppySpacing.xsm) {
+            Image(systemName: icon)
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 22, weight: .regular))
                 .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-            Text("No tasks match these filters")
+                .padding(.bottom, DroppySpacing.xs)
+            Text(title)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-            Text("Try a different status, project, or search term.")
-                .font(.system(size: 10))
+            Text(message)
+                .font(.system(size: 11))
                 .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 28)
-        .padding(.horizontal, 16)
+        .padding(.vertical, DroppySpacing.mdl)
+        .padding(.horizontal, DroppySpacing.md)
         .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A native-style callout: tinted symbol, title, explanation and an
+    /// optional action, on a flat tinted fill (no outline).
+    private func infoBox(icon: String, tint: Color, title: String, message: String, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
+        HStack(alignment: .top, spacing: DroppySpacing.sm) {
+            Image(systemName: icon)
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 20, height: 20)
+
+            VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let actionTitle, let action {
+                    Button(actionTitle, action: action)
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(DroppySpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
+        .accessibilityElement(children: .contain)
     }
 
     private func taskRow(_ task: PlaneTask) -> some View {
@@ -582,7 +709,7 @@ private struct PlaneTasksWidget: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    Spacer(minLength: 26)
+                    Spacer(minLength: 52)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 9)
@@ -593,8 +720,11 @@ private struct PlaneTasksWidget: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .help("Show task details")
 
-            copyRowButton(task)
-                .padding(.trailing, 10)
+            HStack(spacing: DroppySpacing.xsm) {
+                pinRowButton(task)
+                copyRowButton(task)
+            }
+            .padding(.trailing, 10)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
@@ -604,38 +734,60 @@ private struct PlaneTasksWidget: View {
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
     }
 
+    /// Placeholder row. The bars use a tint that contrasts with the card
+    /// fill (the old version drew card-fill on card-fill, so it was nearly
+    /// invisible). The shimmer is applied once to the whole list.
     private func taskSkeletonRow(index: Int) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        let bar = AdaptiveColors.notchSurfaceTertiaryText.opacity(0.28)
+        return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(bar)
                     .frame(width: index.isMultiple(of: 2) ? 42 : 52, height: 7)
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(bar)
                     .frame(width: 62, height: 7)
                 Spacer(minLength: 0)
             }
 
             RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(bar)
                 .frame(width: index == 1 ? 220 : 180, height: 10)
 
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
+                    .fill(bar)
                     .frame(width: 46, height: 16)
                 RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
+                    .fill(bar)
                     .frame(width: index == 2 ? 88 : 74, height: 16)
                 RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
+                    .fill(bar)
                     .frame(width: 72, height: 16)
             }
         }
-        .foregroundStyle(AdaptiveColors.notchSurfaceCardFill)
-        .redacted(reason: .placeholder)
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            AdaptiveColors.notchSurfaceCardFill.opacity(0.55),
+            AdaptiveColors.notchSurfaceCardFill,
             in: RoundedRectangle(cornerRadius: 13, style: .continuous)
         )
-        .opacity(0.72)
+    }
+
+    private func pinRowButton(_ task: PlaneTask) -> some View {
+        let isPinned = droplet.pinnedIDs.contains(task.id)
+        return Button {
+            withAnimation(.snappy(duration: 0.2)) { droplet.togglePin(task) }
+        } label: {
+            Image(systemName: isPinned ? "pin.fill" : "pin")
+                .font(.system(size: 9.5, weight: .medium))
+                .contentTransition(.symbolEffect(.replace))
+                .foregroundStyle(isPinned ? Color.blue : AdaptiveColors.notchSurfaceSecondaryText)
+        }
+        .buttonStyle(DroppyCircleButtonStyle(size: 20))
+        .help(isPinned ? "Unpin task" : "Pin task")
+        .accessibilityLabel(isPinned ? "Unpin task" : "Pin task")
     }
 
     private func copyRowButton(_ task: PlaneTask) -> some View {
@@ -719,33 +871,33 @@ private struct PlaneTasksWidget: View {
         .accessibilityLabel("Couldn’t load Plane: \(message)")
     }
 
-    private func formattedTargetDate(_ rawDate: String?) -> String? {
-        guard let rawDate, !rawDate.isEmpty else { return nil }
-
-        let input = ISO8601DateFormatter()
-        input.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        let date = input.date(from: rawDate)
-            ?? ISO8601DateFormatter().date(from: rawDate)
-            ?? dateOnlyFormatter.date(from: String(rawDate.prefix(10)))
-
-        guard let date else { return rawDate }
-        return targetDateFormatter.string(from: date)
-    }
-
-    private var dateOnlyFormatter: DateFormatter {
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let isoPlain = ISO8601DateFormatter()
+    private static let dateOnlyFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter
-    }
-
-    private var targetDateFormatter: DateFormatter {
+    }()
+    private static let targetDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = .current
         formatter.dateFormat = "MMM d, yyyy"
         return formatter
+    }()
+
+    private func formattedTargetDate(_ rawDate: String?) -> String? {
+        guard let rawDate, !rawDate.isEmpty else { return nil }
+        let date = Self.isoWithFraction.date(from: rawDate)
+            ?? Self.isoPlain.date(from: rawDate)
+            ?? Self.dateOnlyFormatter.date(from: String(rawDate.prefix(10)))
+        guard let date else { return rawDate }
+        return Self.targetDateFormatter.string(from: date)
     }
 
     private func priorityChip(_ priority: String) -> some View {
@@ -1301,6 +1453,43 @@ private struct PlaneTasksWidget: View {
 }
 
 
+/// A soft highlight that sweeps across placeholder content, like the system
+/// loading shimmer. Driven by TimelineView so it keeps animating inside a
+/// hosted view, and it stays still when Reduce Motion is on.
+private struct ShimmerModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let period: Double = 1.5
+
+    func body(content: Content) -> some View {
+        if reduceMotion {
+            content.opacity(0.7)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                let phase = timeline.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: period) / period
+                content.mask {
+                    ZStack {
+                        Color.black.opacity(0.45)
+                        GeometryReader { proxy in
+                            let band = max(proxy.size.width * 0.4, 80)
+                            LinearGradient(
+                                colors: [.clear, .black, .clear],
+                                startPoint: .leading, endPoint: .trailing
+                            )
+                            .frame(width: band, height: proxy.size.height)
+                            .offset(x: -band + phase * (proxy.size.width + band))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private extension View {
+    func shimmering() -> some View { modifier(ShimmerModifier()) }
+}
+
 /// Explicitly removes AppKit scrollbars from SwiftUI ScrollViews while
 /// preserving trackpad/mouse-wheel scrolling. SwiftUI's .scrollIndicators(.hidden)
 /// alone can still leave overlay scrollers visible in hosted macOS views.
@@ -1421,9 +1610,19 @@ private struct PlaneTasksSettings: View {
                 DropletSettingsCard {
                     DropletControlRow(
                         title: "Status",
-                        infoTip: "Fill in the details above, then refresh to load your assigned tasks."
+                        infoTip: "Shows whether Plane accepted your workspace and token the last time it was checked."
                     ) {
-                        statusChip(isReady: droplet.isConfigured)
+                        statusChip(droplet.connectionStatus)
+                    }
+                    if case .failed(let message) = droplet.connectionStatus {
+                        DropletControlRow(title: "Details") {
+                            Text(message)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: 240, alignment: .trailing)
+                        }
                     }
                     DropletControlRow(title: "Refresh") {
                         Button("Refresh") {
@@ -1448,13 +1647,30 @@ private struct PlaneTasksSettings: View {
         }
     }
 
-    /// A small status chip, colored green when ready and orange when it
-    /// still needs setup. DropletValuePill has no color parameter, so this
-    /// is a lightweight custom chip using the same rounded, borderless
-    /// language as the rest of the design system.
-    private func statusChip(isReady: Bool) -> some View {
-        let color: Color = isReady ? .green : .orange
-        return Text(isReady ? "Ready" : "Needs setup")
+    /// Status chip driven by the real result of the last request: green only
+    /// when Plane accepted the credentials, orange while setup is missing or
+    /// the request failed, neutral while checking. Plain tinted pill, no dot.
+    @ViewBuilder
+    private func statusChip(_ status: ConnectionStatus) -> some View {
+        switch status {
+        case .needsSetup:
+            chipLabel("Needs setup", color: .orange)
+        case .checking:
+            HStack(spacing: DroppySpacing.xsm) {
+                ProgressView().controlSize(.mini)
+                Text("Checking…")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        case .connected:
+            chipLabel("Ready", color: .green)
+        case .failed:
+            chipLabel("Can’t connect", color: .red)
+        }
+    }
+
+    private func chipLabel(_ text: String, color: Color) -> some View {
+        Text(text)
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(color)
             .padding(.horizontal, DroppySpacing.sm)
@@ -1464,6 +1680,8 @@ private struct PlaneTasksSettings: View {
 }
 
 fileprivate enum LoadState: Equatable { case needsSetup, loading, loaded, failed(String) }
+fileprivate enum ConnectionStatus: Equatable { case needsSetup, checking, connected, failed(String) }
+fileprivate enum ListTab: Hashable { case all, pinned }
 private struct PlaneUser: Decodable {
     let id: String
 
