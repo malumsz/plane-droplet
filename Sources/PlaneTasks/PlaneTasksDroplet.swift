@@ -27,12 +27,24 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     @Published fileprivate var refreshError: String?
     @Published fileprivate var listTab: ListTab = .all
     @Published fileprivate var pinnedIDs: Set<String> = []
+    @Published fileprivate var newIDs: Set<String> = []
+    private var seenIDs: Set<String> = []
+    private var hasBaseline = false
+    private var pollTask: Task<Void, Never>?
+    private var clearActivityTask: Task<Void, Never>?
+    private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
     private var host: DropletHost?
     private var reloadTask: Task<Void, Never>?
     private let tokenStore = TokenStore(service: "app.getdroppy.plane-tasks")
     
-    public func activate(host: DropletHost) throws { self.host = host; host.log.info("Plane Tasks activated"); loadPins(); refresh() }
-    public func deactivate() { reloadTask?.cancel(); reloadTask = nil; host = nil }
+    public func activate(host: DropletHost) throws { self.host = host; host.log.info("Plane Tasks activated"); loadPins(); loadSeen(); refresh(); startPolling() }
+    public func deactivate() {
+        pollTask?.cancel(); pollTask = nil
+        clearActivityTask?.cancel(); clearActivityTask = nil
+        activitySubject.send(nil)
+        reloadTask?.cancel(); reloadTask = nil
+        host = nil
+    }
     public func refresh() {
         reloadTask?.cancel()
         refreshRevision += 1
@@ -121,6 +133,106 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
         }
     }
 
+    // MARK: New-task alerts
+
+    private var notifiesNewTasks: Bool { host?.preferences.value(forKey: "notifyNewTasks", default: true) ?? true }
+    private var pollMinutes: Int { host?.preferences.value(forKey: "pollMinutes", default: 5) ?? 5 }
+
+    var notifyBinding: Binding<Bool> {
+        Binding(
+            get: { self.notifiesNewTasks },
+            set: {
+                self.host?.preferences.setValue($0, forKey: "notifyNewTasks")
+                if !$0 { self.markNewSeen() }
+                self.startPolling()
+                self.settingsRevision += 1
+            }
+        )
+    }
+
+    private var alertSeconds: Int { host?.preferences.value(forKey: "alertSeconds", default: 5) ?? 5 }
+
+    var alertSecondsBinding: Binding<Int> {
+        Binding(
+            get: { self.alertSeconds },
+            set: { self.host?.preferences.setValue($0, forKey: "alertSeconds"); self.settingsRevision += 1 }
+        )
+    }
+
+    var pollMinutesBinding: Binding<Int> {
+        Binding(
+            get: { self.pollMinutes },
+            set: {
+                self.host?.preferences.setValue($0, forKey: "pollMinutes")
+                self.startPolling()
+                self.settingsRevision += 1
+            }
+        )
+    }
+
+    /// Started in `activate`, cancelled in `deactivate` and on every settings change.
+    private func startPolling() {
+        pollTask?.cancel(); pollTask = nil
+        guard notifiesNewTasks else { return }
+        let seconds = max(1, pollMinutes) * 60
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled, let self else { return }
+                if self.isConfigured && !self.isRefreshing { self.refresh() }
+            }
+        }
+    }
+
+    private func loadSeen() {
+        let raw = host?.preferences.value(forKey: "seenTaskIDs", default: "") ?? ""
+        if let data = raw.data(using: .utf8), let ids = try? JSONDecoder().decode([String].self, from: data) {
+            seenIDs = Set(ids); hasBaseline = true
+        }
+    }
+
+    private func saveSeen() {
+        if let data = try? JSONEncoder().encode(seenIDs.sorted()), let json = String(data: data, encoding: .utf8) {
+            host?.preferences.setValue(json, forKey: "seenTaskIDs")
+        }
+    }
+
+    /// The first successful load is only the baseline; later loads compare against it.
+    private func detectNewTasks() {
+        let current = Set(tasks.map(\.id))
+        guard hasBaseline else { seenIDs = current; hasBaseline = true; saveSeen(); return }
+        let fresh = current.subtracting(seenIDs)
+        guard !fresh.isEmpty else { return }
+        seenIDs.formUnion(fresh); saveSeen()
+        guard notifiesNewTasks else { return }
+        newIDs.formUnion(fresh)
+        announce()
+    }
+
+    /// Fixed priority and isInteractive; only the title changes. `nil` when the alert ends.
+    private func announce() {
+        let count = newIDs.count
+        activitySubject.send(LiveActivityState(
+            priority: 150,
+            accessibilityTitle: count == 1 ? "1 new Plane task" : "\(count) new Plane tasks",
+            isInteractive: false
+        ))
+        clearActivityTask?.cancel()
+        clearActivityTask = Task { [weak self] in
+            let seconds = self?.alertSeconds ?? 5
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled else { return }
+            self?.activitySubject.send(nil)
+        }
+    }
+
+    /// Clears the tab badge and stands the live activity down.
+    fileprivate func markNewSeen() {
+        newIDs = []
+        clearActivityTask?.cancel(); clearActivityTask = nil
+        activitySubject.send(nil)
+    }
+
     /// What the settings status chip shows. It reflects the last real request,
     /// not just "both fields are filled in".
     fileprivate var connectionStatus: ConnectionStatus {
@@ -135,6 +247,9 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     /// re-check, so the status chip never keeps saying "Ready" for old credentials.
     fileprivate func credentialsChanged() {
         settingsRevision += 1
+        seenIDs = []; hasBaseline = false
+        host?.preferences.setValue("", forKey: "seenTaskIDs")
+        markNewSeen()
         tasks = []
         selectedTaskID = nil
         refreshError = nil
@@ -165,6 +280,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
                 .sorted { $0.1 > $1.1 }
                 .map(\.0)
             state = .loaded
+            detectNewTasks()
             host?.log.info("Plane Tasks loaded \(tasks.count) assigned tasks")
         } catch is CancellationError { return
         } catch let error as URLError where error.code == .cancelled { return
@@ -221,9 +337,41 @@ extension PlaneTasksDroplet: ShelfWidgetProviding {
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
 }
 
+extension PlaneTasksDroplet: LiveActivityProviding {
+    public var liveActivityState: AnyPublisher<LiveActivityState?, Never> { activitySubject.eraseToAnyPublisher() }
+
+    public func makeCompactLeading() -> AnyView {
+        AnyView(
+            Image(systemName: "checklist")
+                .font(.system(size: DroppyLiveActivityMetrics.iconSize, weight: .medium))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .padding(.trailing, DroppySpacing.sm)
+        )
+    }
+
+    public func makeCompactTrailing() -> AnyView { AnyView(NewTasksCountLabel(droplet: self)) }
+
+    /// Droppy does not mount this; controls live in the shelf widget.
+    public func makeExpanded(context: LiveActivityContext) -> AnyView { AnyView(EmptyView()) }
+}
+
+private struct NewTasksCountLabel: View {
+    @ObservedObject var droplet: PlaneTasksDroplet
+    var body: some View {
+        Text("+\(droplet.newIDs.count)")
+            .font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .medium, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+            .padding(.horizontal, DroppySpacing.sm)
+            .padding(.vertical, DroppySpacing.xs)
+            .background(Color.blue.opacity(0.35), in: Capsule(style: .continuous))
+            .padding(.leading, DroppySpacing.sm)
+    }
+}
+
 extension PlaneTasksDroplet: SettingsPaneProviding {
     public func makeSettingsPane(context: SettingsPaneContext) -> AnyView { AnyView(PlaneTasksSettings(droplet: self)) }
-    public var settingsSearchEntries: [SettingsSearchEntry] { [SettingsSearchEntry(title: "Plane connection", keywords: ["plane", "token", "workspace", "API"])] }
+    public var settingsSearchEntries: [SettingsSearchEntry] { [SettingsSearchEntry(title: "Plane connection", keywords: ["plane", "token", "workspace", "API"]), SettingsSearchEntry(title: "New task alerts", keywords: ["notify", "notification", "polling", "interval"])] }
 }
 
 fileprivate struct StatusFilterOption: Identifiable {
@@ -267,9 +415,6 @@ private struct PlaneTasksWidget: View {
                 }
             }
         }
-        // Preserve the internal breathing room that was present in the earlier layout.
-        .padding(.horizontal, DroppySpacing.md)
-        .padding(.top, DroppySpacing.md)
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -312,7 +457,7 @@ private struct PlaneTasksWidget: View {
                     .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
                 Spacer(minLength: 0)
                 HStack(spacing: DroppySpacing.xsm) {
-                    chip(label: "All", isSelected: droplet.listTab == .all) { setTab(.all) }
+                    chip(label: "All", isSelected: droplet.listTab == .all, badge: droplet.newIDs.count) { droplet.markNewSeen(); setTab(.all) }
                     chip(label: "Pinned", isSelected: droplet.listTab == .pinned) { setTab(.pinned) }
                 }
                 Button { droplet.refresh() } label: {
@@ -572,7 +717,7 @@ private struct PlaneTasksWidget: View {
         }
     }
 
-    private func chip(label: String, isSelected: Bool, dotColor: Color? = nil, action: @escaping () -> Void) -> some View {
+    private func chip(label: String, isSelected: Bool, dotColor: Color? = nil, badge: Int = 0, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 if let dotColor {
@@ -585,6 +730,12 @@ private struct PlaneTasksWidget: View {
                 Text(label)
                     .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
                     .lineLimit(1)
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .padding(.horizontal, DroppySpacing.xsm)
+                        .background((isSelected ? Color.white : Color.blue).opacity(0.2), in: Capsule(style: .continuous))
+                }
             }
                 .padding(.horizontal, DroppySpacing.sm)
                 .padding(.vertical, DroppySpacing.xsm)
@@ -1630,6 +1781,34 @@ private struct PlaneTasksSettings: View {
                         }
                         .buttonStyle(DroppyQuietButtonStyle(size: .small))
                         .disabled(!droplet.isConfigured)
+                    }
+                }
+            }
+
+            DropletSettingsSection {
+                numberedSectionHeader("4", "New task alerts")
+            } content: {
+                DropletSettingsCard {
+                    DropletToggleRow(
+                        title: "Notify about new tasks",
+                        subtitle: "Shows an alert beside the notch and a badge on the All tab.",
+                        isOn: droplet.notifyBinding
+                    )
+                    DropletControlRow(title: "Check every") {
+                        Picker("Check every", selection: droplet.pollMinutesBinding) {
+                            ForEach([1, 5, 10, 15, 30], id: \.self) { Text("\($0) min").tag($0) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .disabled(!droplet.notifyBinding.wrappedValue)
+                    }
+                    DropletControlRow(title: "Alert duration") {
+                        Picker("Alert duration", selection: droplet.alertSecondsBinding) {
+                            ForEach([3, 5, 10, 15], id: \.self) { Text("\($0) s").tag($0) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .disabled(!droplet.notifyBinding.wrappedValue)
                     }
                 }
             }
