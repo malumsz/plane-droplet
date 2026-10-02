@@ -34,6 +34,7 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     private var clearActivityTask: Task<Void, Never>?
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
     private var host: DropletHost?
+    fileprivate var layoutIsCompact = false
     private var reloadTask: Task<Void, Never>?
     private let tokenStore = TokenStore(service: "app.getdroppy.plane-tasks")
     
@@ -89,14 +90,15 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
     fileprivate var projects: [String] { ["All"] + Array(Set(tasks.map(\.project).filter { !$0.isEmpty })).sorted() }
     /// `tasks` is sorted (newest first) once when it loads, so this only
     /// filters. It runs several times per render, so it must stay cheap.
-    fileprivate var visibleTasks: [PlaneTask] {
+    fileprivate var visibleTasks: [PlaneTask] { filteredTasks(for: listTab) }
+    fileprivate func filteredTasks(for tab: ListTab) -> [PlaneTask] {
         tasks.filter { task in
             let matchesSearch = searchText.isEmpty
                 || task.name.localizedCaseInsensitiveContains(searchText)
                 || task.reference.localizedCaseInsensitiveContains(searchText)
                 || task.project.localizedCaseInsensitiveContains(searchText)
             // The Pinned tab ignores project and status on purpose.
-            if listTab == .pinned { return pinnedIDs.contains(task.id) && matchesSearch }
+            if tab == .pinned { return pinnedIDs.contains(task.id) && matchesSearch }
             let statusMatches = selectedStatuses.isEmpty
                 || (selectedProject == "All" ? selectedStatuses.contains(task.stateGroup) : selectedStatuses.contains(task.status))
             return statusMatches && (selectedProject == "All" || task.project == selectedProject) && matchesSearch
@@ -348,7 +350,19 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
 
 extension PlaneTasksDroplet: ShelfWidgetProviding {
     public var widgetDescriptors: [ShelfWidgetDescriptor] {
-        [ShelfWidgetDescriptor(id: "plane-tasks", title: "Plane Tasks", systemImage: "checklist", layoutTraits: ShelfWidgetLayoutTraits(preferredSoloWidth: 520, preferredPairedWidth: 260, contentHeight: .fixed(340)), searchKeywords: ["plane", "tasks", "assigned", "work items"])]
+        [ShelfWidgetDescriptor(id: "plane-tasks", title: "Plane Tasks", systemImage: "checklist", layoutTraits: ShelfWidgetLayoutTraits(preferredSoloWidth: 520, preferredPairedWidth: 260, contentHeight: .fixed(widgetContentHeight)), searchKeywords: ["plane", "tasks", "assigned", "work items"])]
+    }
+
+    /// The shelf takes one height per widget, and `widgetDescriptors` is the only
+    /// place to declare it. The solo widget keeps its 340; the paired (compact)
+    /// widget stays at a short fixed height and scrolls its content.
+    fileprivate var widgetContentHeight: CGFloat { layoutIsCompact ? 180 : 340 }
+
+    /// Called by the widget view when it learns whether it is paired.
+    fileprivate func reportLayout(isCompact: Bool) {
+        guard layoutIsCompact != isCompact else { return }
+        layoutIsCompact = isCompact
+        host?.shelf.invalidateLayout(for: "plane-tasks")
     }
     public func makeWidgetView(_ id: ShelfWidgetID, context: ShelfWidgetContext) -> AnyView { AnyView(PlaneTasksWidget(droplet: self, context: context)) }
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
@@ -419,9 +433,7 @@ private struct PlaneTasksWidget: View {
 
     var body: some View {
         Group {
-            if context.isCompact {
-                compactContent
-            } else {
+            Group {
                 GeometryReader { proxy in
                     ZStack(alignment: .topLeading) {
                         taskListScreen
@@ -449,6 +461,8 @@ private struct PlaneTasksWidget: View {
             trailing: context.contentInsets.trailing
         ))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear { droplet.reportLayout(isCompact: context.isCompact) }
+        .onChange(of: context.isCompact) { _, newValue in droplet.reportLayout(isCompact: newValue) }
     }
 
     /// Animating the state change makes the filters fade out and the list
@@ -458,21 +472,9 @@ private struct PlaneTasksWidget: View {
         withAnimation(.snappy(duration: 0.3)) { droplet.listTab = tab }
     }
 
-    private var compactContent: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            HStack(spacing: DroppySpacing.xsm) {
-                Image(systemName: "checklist")
-                    .font(.system(size: 10, weight: .medium))
-                Text("Plane Tasks")
-                    .font(.system(size: 12, weight: .semibold))
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-            Text("\(droplet.tasks.count)").font(.system(size: 26, weight: .semibold, design: .rounded))
-            Text("assigned tasks").font(.caption).foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-            Spacer(minLength: 0)
-        }
-    }
+    /// Compact widgets only ever show the pinned tab (and task details);
+    /// the shared `listTab` is left alone so the full widget keeps its own tab.
+    private var effectiveTab: ListTab { context.isCompact ? .pinned : droplet.listTab }
 
     private var taskListScreen: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -499,25 +501,32 @@ private struct PlaneTasksWidget: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Loading tasks")
                 case .loaded:
-                    VStack(alignment: .leading, spacing: 10) {
-                        if let message = droplet.refreshError {
-                            errorBox(message)
-                        }
-                        HStack(spacing: DroppySpacing.sm) {
-                            searchField
-                            // The Pinned tab ignores project and status, so the filters hide there.
-                            if droplet.listTab == .all {
-                                projectFilter
+                    // The compact widget has no search field, so this block is empty there
+                    // unless there is an error. An empty VStack would still add a 10pt gap
+                    // above the list, so it is left out entirely instead.
+                    if !context.isCompact || droplet.refreshError != nil {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if let message = droplet.refreshError {
+                                errorBox(message)
+                            }
+                            if !context.isCompact {
+                                HStack(spacing: DroppySpacing.sm) {
+                                    searchField
+                                    // The Pinned tab ignores project and status, so the filters hide there.
+                                    if effectiveTab == .all {
+                                        projectFilter
+                                    }
+                                }
+                            }
+                            if effectiveTab == .all {
+                                statusChips
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
                             }
                         }
-                        if droplet.listTab == .all {
-                            statusChips
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        .onChange(of: droplet.searchText) { _, _ in
+                            droplet.selectedTaskID = nil
                         }
-                    }
-                    .onChange(of: droplet.searchText) { _, _ in
-                        droplet.selectedTaskID = nil
                     }
                     taskList
                 case .failed(let message):
@@ -531,25 +540,27 @@ private struct PlaneTasksWidget: View {
         HStack(spacing: DroppySpacing.xsm) {
             Image(systemName: "checklist")
                 .font(.system(size: 11, weight: .medium))
-            Text("Plane Tasks")
+            Text(context.isCompact ? "Pinned Tasks" : "Plane Tasks")
                 .font(.system(size: 12, weight: .semibold))
             Spacer(minLength: 0)
             HStack(spacing: DroppySpacing.sm) {
-                headerButton(
-                    symbol: "line.3.horizontal.decrease",
-                    isActive: droplet.listTab == .all,
-                    help: "All tasks"
-                ) {
-                    droplet.markNewSeen()
-                    setTab(.all)
-                }
-                headerButton(
-                    symbol: "pin.fill",
-                    isActive: droplet.listTab == .pinned,
-                    activeTint: .blue,
-                    help: "Pinned tasks"
-                ) {
-                    setTab(.pinned)
+                if !context.isCompact {
+                    headerButton(
+                        symbol: "line.3.horizontal.decrease",
+                        isActive: effectiveTab == .all,
+                        help: "All tasks"
+                    ) {
+                        droplet.markNewSeen()
+                        setTab(.all)
+                    }
+                    headerButton(
+                        symbol: "pin.fill",
+                        isActive: effectiveTab == .pinned,
+                        activeTint: .blue,
+                        help: "Pinned tasks"
+                    ) {
+                        setTab(.pinned)
+                    }
                 }
                 Button { droplet.refresh() } label: {
                     Group {
@@ -624,18 +635,24 @@ private struct PlaneTasksWidget: View {
 
     private var taskList: some View {
         GeometryReader { proxy in
-            let visible = droplet.visibleTasks
+            let visible = context.isCompact
+                ? droplet.tasks.filter { droplet.pinnedIDs.contains($0.id) }
+                : droplet.filteredTasks(for: effectiveTab)
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ScrollViewScrollerHider()
                         .frame(width: 0, height: 0)
                     ForEach(visible) { task in
-                        taskRow(task)
+                        if context.isCompact {
+                            compactTaskRow(task)
+                        } else {
+                            taskRow(task)
+                        }
                     }
                     if visible.isEmpty {
-                        if droplet.listTab == .pinned && droplet.searchText.isEmpty {
+                        if effectiveTab == .pinned && (droplet.searchText.isEmpty || context.isCompact) {
                             emptyState(icon: "pin.slash", title: "No pinned tasks", message: "Use the pin button on a task to keep it here.")
-                        } else if droplet.listTab == .pinned {
+                        } else if effectiveTab == .pinned {
                             emptyState(icon: "magnifyingglass", title: "No pinned tasks match", message: "Try a different search term.")
                         } else {
                             emptyState(icon: "tray", title: "No tasks match these filters", message: "Try a different status, project, or search term.")
@@ -931,6 +948,67 @@ private struct PlaneTasksWidget: View {
             .joined(separator: " ")
     }
 
+    /// Narrow card for compact widgets: reference + one-line title, then
+    /// priority (icon only), state and date. Everything can shrink, so
+    /// nothing is ever wider than the widget. Project and description are
+    /// left to the detail page.
+    private func compactTaskRow(_ task: PlaneTask) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+        return ZStack(alignment: .topTrailing) {
+            Button {
+                showDetails(for: task)
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(task.reference.uppercased())
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineLimit(1)
+                        Text(task.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .padding(.trailing, 52)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(spacing: 6) {
+                        priorityChip(task.priority, iconOnly: true)
+                            .fixedSize()
+                            .layoutPriority(2)
+                        stateChip(task)
+                        Spacer(minLength: 4)
+                        if let date = formattedTargetDate(task.targetDate) {
+                            Text(date)
+                                .font(.system(size: 10, weight: .regular))
+                                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                                .lineLimit(1)
+                                .fixedSize()
+                                .layoutPriority(1)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(shape)
+            }
+            .buttonStyle(.plain)
+            .help("Show task details")
+
+            HStack(spacing: 6) {
+                copyRowButton(task)
+                pinRowButton(task)
+            }
+            .padding(.top, 10)
+            .padding(.trailing, 10)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AdaptiveColors.notchSurfaceCardFill, in: shape)
+        .contentShape(shape)
+    }
+
     private func taskRow(_ task: PlaneTask) -> some View {
         let shape = RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
         return ZStack(alignment: .topTrailing) {
@@ -1192,19 +1270,21 @@ private struct PlaneTasksWidget: View {
 
     /// Priority uses the SF Symbol `cellularbars` with a variable value,
     /// so the bars fill up with the priority level.
-    private func priorityChip(_ priority: String) -> some View {
+    private func priorityChip(_ priority: String, iconOnly: Bool = false) -> some View {
         let style = priorityStyle(priority)
 
         return HStack(spacing: 5) {
             Image(systemName: "cellularbars", variableValue: style.level)
                 .font(.system(size: 10, weight: .semibold))
 
-            Text(style.label)
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(1)
+            if !iconOnly {
+                Text(style.label)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+            }
         }
         .foregroundStyle(style.tint)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, iconOnly ? 8 : 10)
         .padding(.vertical, 5)
         .background(style.tint.opacity(0.16), in: Capsule(style: .continuous))
         .help("Priority: \(style.label)")
