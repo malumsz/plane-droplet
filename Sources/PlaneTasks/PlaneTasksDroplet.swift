@@ -117,6 +117,23 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
         return isoWithFraction.date(from: raw) ?? isoPlain.date(from: raw) ?? .distantPast
     }
 
+    /// Number of tasks per status chip (nil = the "All" chip), respecting the
+    /// selected project and the search text so the numbers match the list.
+    fileprivate func taskCount(status id: String?) -> Int {
+        tasks.reduce(0) { total, task in
+            let matchesSearch = searchText.isEmpty
+                || task.name.localizedCaseInsensitiveContains(searchText)
+                || task.reference.localizedCaseInsensitiveContains(searchText)
+                || task.project.localizedCaseInsensitiveContains(searchText)
+            guard matchesSearch, selectedProject == "All" || task.project == selectedProject else { return total }
+            if let id {
+                let key = selectedProject == "All" ? task.stateGroup : task.status
+                guard key == id else { return total }
+            }
+            return total + 1
+        }
+    }
+
     // MARK: Pins
 
     private func loadPins() {
@@ -391,6 +408,14 @@ private struct PlaneTasksWidget: View {
     @State private var detailTask: PlaneTask?
     @State private var isShowingDetail = false
     @State private var isInitialLoading = false
+    @State private var listOffsetY: CGFloat = 0
+    @State private var listContentHeight: CGFloat = 0
+    @State private var listViewportHeight: CGFloat = 0
+    @State private var detailOffsetY: CGFloat = 0
+    @State private var detailContentHeight: CGFloat = 0
+    @State private var detailViewportHeight: CGFloat = 0
+    @State private var descriptionHeight: CGFloat = 0
+    private let cardRadius: CGFloat = 20
 
     var body: some View {
         Group {
@@ -415,7 +440,14 @@ private struct PlaneTasksWidget: View {
                 }
             }
         }
-        .padding(context.contentInsets)
+        // No bottom inset: the list and the detail page run to the bottom edge
+        // and dissolve there with the edge fade.
+        .padding(EdgeInsets(
+            top: context.contentInsets.top,
+            leading: context.contentInsets.leading,
+            bottom: 0,
+            trailing: context.contentInsets.trailing
+        ))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -443,40 +475,9 @@ private struct PlaneTasksWidget: View {
     }
 
     private var taskListScreen: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            HStack(spacing: DroppySpacing.xsm) {
-                Image(systemName: "checklist")
-                    .font(.system(size: 10, weight: .medium))
-                Text("Plane Tasks")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("\(droplet.visibleTasks.count)")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    .padding(.horizontal, DroppySpacing.xsm)
-                    .padding(.vertical, 2)
-                    .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
-                Spacer(minLength: 0)
-                HStack(spacing: DroppySpacing.xsm) {
-                    chip(label: "All", isSelected: droplet.listTab == .all, badge: droplet.newIDs.count) { droplet.markNewSeen(); setTab(.all) }
-                    chip(label: "Pinned", isSelected: droplet.listTab == .pinned) { setTab(.pinned) }
-                }
-                Button { droplet.refresh() } label: {
-                    Group {
-                        if droplet.isRefreshing {
-                            ProgressView()
-                                .controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 10, weight: .medium))
-                        }
-                    }
-                    .frame(width: 20, height: 20)
-                }
-                .buttonStyle(DroppyCircleButtonStyle(size: 20))
-                .disabled(droplet.isRefreshing)
-                .help("Refresh")
-            }
-            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+        VStack(alignment: .leading, spacing: 10) {
+            listHeader
+                .padding(.bottom, 4)
             switch droplet.state {
                 case .needsSetup:
                     infoBox(
@@ -488,7 +489,7 @@ private struct PlaneTasksWidget: View {
                         action: { droplet.openSettings() }
                     )
                 case .loading:
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(0..<4, id: \.self) { index in
                             taskSkeletonRow(index: index)
                         }
@@ -498,144 +499,257 @@ private struct PlaneTasksWidget: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Loading tasks")
                 case .loaded:
-                    VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                    VStack(alignment: .leading, spacing: 10) {
                         if let message = droplet.refreshError {
                             errorBox(message)
                         }
-                        HStack(spacing: DroppySpacing.xsm) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                            TextField("Search title, ID, project…", text: $droplet.searchText)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 13))
-                                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                            if !droplet.searchText.isEmpty {
-                                Button {
-                                    droplet.searchText = ""
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Clear search")
-                            }
-                        }
-                        .padding(.horizontal, DroppySpacing.sm)
-                        .padding(.vertical, DroppySpacing.xsm)
-                        .background(
-                            AdaptiveColors.notchSurfaceCardFill,
-                            in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
-                        )
-
-                        // The Pinned tab ignores project and status, so the filters hide there.
-                        if droplet.listTab == .all {
-                            HStack(alignment: .center, spacing: DroppySpacing.sm) {
-                                statusChips
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: DroppySpacing.sm) {
+                            searchField
+                            // The Pinned tab ignores project and status, so the filters hide there.
+                            if droplet.listTab == .all {
                                 projectFilter
                             }
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                        if droplet.listTab == .all {
+                            statusChips
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
                     .onChange(of: droplet.searchText) { _, _ in
                         droplet.selectedTaskID = nil
                     }
-                    GeometryReader { proxy in
-                        let visible = droplet.visibleTasks
-                        ScrollView(.vertical) {
-                            LazyVStack(alignment: .leading, spacing: 6) {
-                                ScrollViewScrollerHider()
-                                    .frame(width: 0, height: 0)
-                                ForEach(visible) { task in
-                                    taskRow(task)
-                                }
-                                if visible.isEmpty {
-                                    if droplet.listTab == .pinned && droplet.searchText.isEmpty {
-                                        emptyState(icon: "pin.slash", title: "No pinned tasks", message: "Use the pin button on a task to keep it here.")
-                                    } else if droplet.listTab == .pinned {
-                                        emptyState(icon: "magnifyingglass", title: "No pinned tasks match", message: "Try a different search term.")
-                                    } else {
-                                        emptyState(icon: "tray", title: "No tasks match these filters", message: "Try a different status, project, or search term.")
-                                    }
-                                }
-                            }
-                            .frame(width: proxy.size.width, alignment: .leading)
-                        }
-                        .scrollIndicators(.hidden, axes: .vertical)
-                    }
-                    .frame(maxHeight: 200)
+                    taskList
                 case .failed(let message):
                     errorBox(message)
             }
             Spacer(minLength: 0)
         }
     }
-    
+
+    private var listHeader: some View {
+        HStack(spacing: DroppySpacing.xsm) {
+            Image(systemName: "checklist")
+                .font(.system(size: 11, weight: .medium))
+            Text("Plane Tasks")
+                .font(.system(size: 12, weight: .semibold))
+            Spacer(minLength: 0)
+            HStack(spacing: DroppySpacing.sm) {
+                headerButton(
+                    symbol: "line.3.horizontal.decrease",
+                    isActive: droplet.listTab == .all,
+                    help: "All tasks"
+                ) {
+                    droplet.markNewSeen()
+                    setTab(.all)
+                }
+                headerButton(
+                    symbol: "pin.fill",
+                    isActive: droplet.listTab == .pinned,
+                    activeTint: .blue,
+                    help: "Pinned tasks"
+                ) {
+                    setTab(.pinned)
+                }
+                Button { droplet.refresh() } label: {
+                    Group {
+                        if droplet.isRefreshing {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.white.opacity(0.10)))
+                    .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(droplet.isRefreshing)
+                .help("Refresh")
+                .accessibilityLabel("Refresh")
+            }
+        }
+        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+    }
+
+    private func headerButton(symbol: String, isActive: Bool, activeTint: Color = AdaptiveColors.notchSurfacePrimaryText, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(isActive ? activeTint : AdaptiveColors.notchSurfaceSecondaryText)
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(Color.white.opacity(isActive ? 0.14 : 0)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .animation(.snappy(duration: 0.2), value: isActive)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: DroppySpacing.xsm) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            TextField("Search title, ID, project…", text: $droplet.searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+            if !droplet.searchText.isEmpty {
+                Button {
+                    droplet.searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
+    }
+
+    /// Scrolling task list with the same edge fade as the status chips: the
+    /// fade only shows on a side that still has content to reveal.
+    private var canScrollListUp: Bool { listOffsetY > 1 }
+    private var canScrollListDown: Bool { (listContentHeight - listViewportHeight - listOffsetY) > 1 }
+
+    private var taskList: some View {
+        GeometryReader { proxy in
+            let visible = droplet.visibleTasks
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ScrollViewScrollerHider()
+                        .frame(width: 0, height: 0)
+                    ForEach(visible) { task in
+                        taskRow(task)
+                    }
+                    if visible.isEmpty {
+                        if droplet.listTab == .pinned && droplet.searchText.isEmpty {
+                            emptyState(icon: "pin.slash", title: "No pinned tasks", message: "Use the pin button on a task to keep it here.")
+                        } else if droplet.listTab == .pinned {
+                            emptyState(icon: "magnifyingglass", title: "No pinned tasks match", message: "Try a different search term.")
+                        } else {
+                            emptyState(icon: "tray", title: "No tasks match these filters", message: "Try a different status, project, or search term.")
+                        }
+                    }
+                }
+                .padding(.bottom, 8)
+                .frame(width: proxy.size.width, alignment: .leading)
+            }
+            .scrollIndicators(.hidden, axes: .vertical)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, newValue in
+                listOffsetY = newValue
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentSize.height
+            } action: { _, newValue in
+                listContentHeight = newValue
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.containerSize.height
+            } action: { _, newValue in
+                listViewportHeight = newValue
+            }
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [.clear, .black],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: canScrollListUp ? 28 : 0)
+
+                    Color.black
+
+                    LinearGradient(
+                        colors: [.black, .clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: canScrollListDown ? 28 : 0)
+                }
+            }
+            .animation(.easeInOut(duration: 0.15), value: canScrollListUp)
+            .animation(.easeInOut(duration: 0.15), value: canScrollListDown)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var projectFilter: some View {
         Button {
             isProjectPopoverPresented.toggle()
         } label: {
-            HStack(spacing: DroppySpacing.xsm) {
-                Image(systemName: "folder")
+            HStack(spacing: 6) {
+                Image(systemName: "folder.fill")
                     .font(.system(size: 11, weight: .medium))
-                Text(droplet.selectedProject == "All" ? "Project" : droplet.selectedProject)
-                    .font(.system(size: 11, weight: .medium))
+                Text(droplet.selectedProject == "All" ? "Select project" : droplet.selectedProject)
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                Spacer(minLength: 0)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
             }
             .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .frame(width: 150)
+            .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule(style: .continuous))
+            .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(DroppyQuietButtonStyle(size: .small))
-        .fixedSize()
+        .buttonStyle(.plain)
         .help("Filter by project")
         .popover(isPresented: $isProjectPopoverPresented, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
-                Text("Projects")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    .padding(.horizontal, DroppySpacing.sm)
-                    .padding(.top, DroppySpacing.xsm)
-
-                projectOption("All projects", value: "All")
-                Divider().overlay(AdaptiveColors.notchSurfaceTertiaryText.opacity(0.25))
-                ForEach(droplet.projects.filter { $0 != "All" }, id: \.self) { project in
-                    projectOption(project, value: project)
-                }
-            }
-            .padding(DroppySpacing.sm)
-            .frame(minWidth: 210, maxWidth: 280)
-            .droppyFlatGlassControls()
-            .presentationCompactAdaptation(.popover)
+            projectMenu
+                .presentationCompactAdaptation(.popover)
         }
     }
 
+    /// Menu-style list: no header, checkmark column, accent highlight on hover.
+    private var projectMenu: some View {
+        let names = droplet.projects.filter { $0 != "All" }
+        let rows = VStack(alignment: .leading, spacing: 1) {
+            projectOption("All projects", value: "All")
+            if !names.isEmpty {
+                Divider()
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 6)
+            }
+            ForEach(names, id: \.self) { project in
+                projectOption(project, value: project)
+            }
+        }
+        return Group {
+            if names.count > 8 {
+                ScrollView {
+                    rows
+                }
+                .scrollIndicators(.hidden)
+                .frame(height: 240)
+            } else {
+                rows
+            }
+        }
+        .padding(6)
+        .frame(minWidth: 200, maxWidth: 280)
+    }
+
     private func projectOption(_ title: String, value: String) -> some View {
-        Button {
+        ProjectMenuRow(title: title, isSelected: droplet.selectedProject == value) {
             droplet.selectedProject = value
             droplet.selectedStatuses.removeAll()
             droplet.selectedTaskID = nil
             isProjectPopoverPresented = false
-        } label: {
-            HStack(spacing: DroppySpacing.sm) {
-                Text(title)
-                    .font(.system(size: 12, weight: droplet.selectedProject == value ? .semibold : .regular))
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if droplet.selectedProject == value {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-            }
-            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-            .padding(.horizontal, DroppySpacing.sm)
-            .padding(.vertical, DroppySpacing.xsm)
-            .contentShape(RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
         }
-        .buttonStyle(DroppyGlassButtonStyle())
     }
 
     private var canScrollChipsLeft: Bool { chipsOffsetX > 1 }
@@ -644,14 +758,14 @@ private struct PlaneTasksWidget: View {
     private var statusChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: DroppySpacing.xsm) {
-                chip(label: "All", isSelected: droplet.selectedStatuses.isEmpty) {
+                chip(label: "All", isSelected: droplet.selectedStatuses.isEmpty, count: droplet.taskCount(status: nil)) {
                     withAnimation(.snappy(duration: 0.22)) {
                         droplet.selectedStatuses.removeAll()
                     }
                 }
                 ForEach(droplet.statusFilterOptions) { option in
                     let isOn = droplet.selectedStatuses.contains(option.id)
-                    chip(label: option.label, isSelected: isOn, dotColor: groupColor(option.group)) {
+                    chip(label: option.label, isSelected: isOn, dotColor: groupColor(option.group), count: droplet.taskCount(status: option.id)) {
                         withAnimation(.snappy(duration: 0.22)) {
                             if isOn {
                                 droplet.selectedStatuses.remove(option.id)
@@ -717,44 +831,39 @@ private struct PlaneTasksWidget: View {
         }
     }
 
-    private func chip(label: String, isSelected: Bool, dotColor: Color? = nil, badge: Int = 0, action: @escaping () -> Void) -> some View {
+    private func chip(label: String, isSelected: Bool, dotColor: Color? = nil, count: Int? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 if let dotColor {
                     Circle()
                         .fill(dotColor)
-                        .overlay(Circle().stroke(isSelected ? Color.black.opacity(0.9) : AdaptiveColors.notchSurfaceCardFill, lineWidth: 1.25))
                         .frame(width: 7, height: 7)
-                        .shadow(color: isSelected ? AdaptiveColors.notchSurfaceCardFill.opacity(0.9) : .clear, radius: 1)
                 }
                 Text(label)
-                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
-                if badge > 0 {
-                    Text("\(badge)")
+                if let count {
+                    Text("\(count)")
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .padding(.horizontal, DroppySpacing.xsm)
-                        .background((isSelected ? Color.white : Color.blue).opacity(0.2), in: Capsule(style: .continuous))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
                 }
             }
-                .padding(.horizontal, DroppySpacing.sm)
-                .padding(.vertical, DroppySpacing.xsm)
-                .foregroundStyle(isSelected ? Color.white : AdaptiveColors.notchSurfaceSecondaryText)
-                .background {
-                    if isSelected {
-                        Capsule(style: .continuous)
-                            .fill(Color.blue)
-                    } else {
-                        Capsule(style: .continuous)
-                            .fill(AdaptiveColors.notchSurfaceCardFill)
-                    }
-                }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .foregroundStyle(isSelected ? AdaptiveColors.notchSurfacePrimaryText : AdaptiveColors.notchSurfaceSecondaryText)
+            .background {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(isSelected ? 0.12 : 0))
+            }
         }
         .buttonStyle(.plain)
         .animation(.snappy(duration: 0.22), value: isSelected)
         .help(isSelected ? "Selected" : "Filter by \(label)")
     }
-    
+
     /// Centered empty state, like a native "content unavailable" view:
     /// hierarchical SF Symbol, short title, one line of guidance, on a flat
     /// raised tile (no outline, no gradient).
@@ -814,75 +923,91 @@ private struct PlaneTasksWidget: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// Collapses every newline / run of spaces so the description is a single
+    /// line that truncates with an ellipsis instead of wrapping.
+    private func singleLine(_ text: String) -> String {
+        String(text.prefix(300))
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+    }
+
     private func taskRow(_ task: PlaneTask) -> some View {
-        ZStack(alignment: .trailing) {
+        let shape = RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+        return ZStack(alignment: .topTrailing) {
             Button {
                 showDetails(for: task)
             } label: {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            Text(task.reference.uppercased())
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                                .lineLimit(1)
-
-                            if let date = formattedTargetDate(task.targetDate) {
-                                Circle()
-                                    .fill(AdaptiveColors.notchSurfaceTertiaryText.opacity(0.65))
-                                    .frame(width: 3, height: 3)
-
-                                HStack(spacing: 4) {
-                                    Image(systemName: "calendar")
-                                        .font(.system(size: 9, weight: .regular))
-                                    Text(date)
-                                        .font(.system(size: 10, weight: .regular))
-                                }
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                                .lineLimit(1)
-                            }
-
-                            Spacer(minLength: 0)
-                        }
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(task.reference.uppercased())
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineLimit(1)
 
                         Text(task.name)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
 
-                        HStack(spacing: 6) {
-                            priorityChip(task.priority)
-                            stateChip(task)
-                            projectChip(task.project)
+                        if !task.descriptionText.isEmpty {
+                            Text(singleLine(task.descriptionText))
+                                .font(.system(size: 10))
+                                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    // Keeps long titles clear of the copy / pin buttons.
+                    .padding(.trailing, 56)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Spacer(minLength: 52)
+                    // With a date, the chips give way (project first, then state,
+                    // then priority) so the date always fits. Without one they
+                    // keep their natural size.
+                    let dateText = formattedTargetDate(task.targetDate)
+                    HStack(spacing: 6) {
+                        priorityChip(task.priority)
+                            .fixedSize(horizontal: dateText == nil, vertical: false)
+                            .layoutPriority(2)
+                        stateChip(task)
+                            .fixedSize(horizontal: dateText == nil, vertical: false)
+                            .layoutPriority(1)
+                        projectChip(task.project)
+                        Spacer(minLength: 8)
+                        if let date = dateText {
+                            HStack(spacing: 4) {
+                                Image(systemName: "calendar.badge.clock")
+                                    .font(.system(size: 10, weight: .regular))
+                                Text(date)
+                                    .font(.system(size: 11, weight: .regular))
+                            }
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .layoutPriority(3)
+                        }
+                    }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .contentShape(shape)
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
             .help("Show task details")
 
-            HStack(spacing: DroppySpacing.xsm) {
-                pinRowButton(task)
+            HStack(spacing: 6) {
                 copyRowButton(task)
+                pinRowButton(task)
             }
-            .padding(.trailing, 10)
+            .padding(.top, 12)
+            .padding(.trailing, 12)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            AdaptiveColors.notchSurfaceCardFill,
-            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .background(AdaptiveColors.notchSurfaceCardFill, in: shape)
+        .contentShape(shape)
     }
 
     /// Placeholder row. The bars use a tint that contrasts with the card
@@ -905,24 +1030,28 @@ private struct PlaneTasksWidget: View {
                 .fill(bar)
                 .frame(width: index == 1 ? 220 : 180, height: 10)
 
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(bar)
+                .frame(width: 260, height: 7)
+
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
                     .fill(bar)
-                    .frame(width: 46, height: 16)
+                    .frame(width: 46, height: 22)
                 RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
                     .fill(bar)
-                    .frame(width: index == 2 ? 88 : 74, height: 16)
+                    .frame(width: index == 2 ? 88 : 74, height: 22)
                 RoundedRectangle(cornerRadius: DroppyRadius.full, style: .continuous)
                     .fill(bar)
-                    .frame(width: 72, height: 16)
+                    .frame(width: 72, height: 22)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             AdaptiveColors.notchSurfaceCardFill,
-            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+            in: RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
         )
     }
 
@@ -931,7 +1060,7 @@ private struct PlaneTasksWidget: View {
         return Button {
             withAnimation(.snappy(duration: 0.2)) { droplet.togglePin(task) }
         } label: {
-            Image(systemName: isPinned ? "pin.fill" : "pin")
+            Image(systemName: "pin.fill")
                 .font(.system(size: 9.5, weight: .medium))
                 .contentTransition(.symbolEffect(.replace))
                 .foregroundStyle(isPinned ? Color.blue : AdaptiveColors.notchSurfaceSecondaryText)
@@ -1051,94 +1180,77 @@ private struct PlaneTasksWidget: View {
         return Self.targetDateFormatter.string(from: date)
     }
 
+    private func priorityStyle(_ priority: String) -> (label: String, tint: Color, level: Double) {
+        switch priority.lowercased() {
+        case "urgent": return ("Urgent", .purple, 1.0)
+        case "high": return ("High", .red, 0.75)
+        case "medium": return ("Medium", .orange, 0.5)
+        case "low": return ("Low", .green, 0.25)
+        default: return ("No priority", AdaptiveColors.notchSurfaceTertiaryText, 0)
+        }
+    }
+
+    /// Priority uses the SF Symbol `cellularbars` with a variable value,
+    /// so the bars fill up with the priority level.
     private func priorityChip(_ priority: String) -> some View {
-        let normalized = priority.lowercased()
-
-        let label: String = {
-            switch normalized {
-            case "urgent": return "Urgent"
-            case "high": return "High"
-            case "medium": return "Medium"
-            case "low": return "Low"
-            default: return "No priority"
-            }
-        }()
-
-        let tint: Color = {
-            switch normalized {
-            case "urgent": return .purple
-            case "high": return .red
-            case "medium": return .orange
-            case "low": return .green
-            default: return AdaptiveColors.notchSurfaceTertiaryText
-            }
-        }()
-
-        let filledBars: Int = {
-            switch normalized {
-            case "low": return 1
-            case "medium": return 2
-            case "high", "urgent": return 3
-            default: return 0
-            }
-        }()
+        let style = priorityStyle(priority)
 
         return HStack(spacing: 5) {
-            HStack(alignment: .bottom, spacing: 1.5) {
-                ForEach(0..<3, id: \.self) { index in
-                    Capsule()
-                        .fill(index < filledBars ? tint : tint.opacity(0.22))
-                        .frame(width: 3, height: CGFloat(4 + index * 2))
-                }
-            }
+            Image(systemName: "cellularbars", variableValue: style.level)
+                .font(.system(size: 10, weight: .semibold))
 
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
+            Text(style.label)
+                .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
         }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background(tint.opacity(0.13), in: Capsule(style: .continuous))
-        .help("Priority: \(label)")
+        .foregroundStyle(style.tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(style.tint.opacity(0.16), in: Capsule(style: .continuous))
+        .help("Priority: \(style.label)")
     }
 
     private func stateChip(_ task: PlaneTask) -> some View {
         let tint = groupColor(task.stateGroup)
 
-        return HStack(spacing: 4) {
+        return HStack(spacing: 5) {
             Circle()
                 .fill(tint)
-                .frame(width: 5, height: 5)
+                .frame(width: 7, height: 7)
 
             Text(task.status)
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
         }
-        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background(
-            AdaptiveColors.notchSurfaceCardFill.opacity(0.9),
-            in: Capsule(style: .continuous)
-        )
+        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
         .help("State: \(task.status)")
     }
 
     private func projectChip(_ project: String) -> some View {
-        Text(project)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-            .lineLimit(1)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(AdaptiveColors.notchSurfaceCardFill.opacity(0.9), in: Capsule(style: .continuous))
-            .help("Project: \(project)")
+        HStack(spacing: 5) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            Text(project)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
+        .help("Project: \(project)")
     }
 
+    private var canScrollDetailUp: Bool { detailOffsetY > 1 }
+    private var canScrollDetailDown: Bool { (detailContentHeight - detailViewportHeight - detailOffsetY) > 1 }
+
     private func detailScreen(_ task: PlaneTask) -> some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            HStack(spacing: DroppySpacing.xsm) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: DroppySpacing.sm) {
                 Button {
                     closeDetails()
                 } label: {
@@ -1150,56 +1262,142 @@ private struct PlaneTasksWidget: View {
 
                 Text("Plane Tasks")
                     .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                 Spacer(minLength: 0)
                 detailActionGroup(task)
             }
             .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
 
-            detailView(task)
-            Spacer(minLength: 0)
+            // The header stays put; properties, title and description scroll
+            // together, with the same edge fade as the list.
+            ScrollView(.vertical) {
+                detailView(task)
+                    .padding(.bottom, 24)
+                    .background {
+                        ScrollViewScrollerHider()
+                            .frame(width: 0, height: 0)
+                    }
+            }
+            .id(task.id)
+            .scrollIndicators(.hidden, axes: .vertical)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, newValue in
+                detailOffsetY = newValue
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentSize.height
+            } action: { _, newValue in
+                detailContentHeight = newValue
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.containerSize.height
+            } action: { _, newValue in
+                detailViewportHeight = newValue
+            }
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [.clear, .black],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: canScrollDetailUp ? 28 : 0)
+
+                    Color.black
+
+                    LinearGradient(
+                        colors: [.black, .clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: canScrollDetailDown ? 28 : 0)
+                }
+            }
+            .animation(.easeInOut(duration: 0.15), value: canScrollDetailUp)
+            .animation(.easeInOut(duration: 0.15), value: canScrollDetailDown)
         }
     }
 
     private func detailView(_ task: PlaneTask) -> some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            HStack(spacing: 6) {
-                Text(task.reference.uppercased())
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                if let date = formattedTargetDate(task.targetDate) {
-                    Image(systemName: "calendar")
-                        .font(.system(size: 8))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    Text(date)
-                        .font(.system(size: 9))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Properties")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    propertyRow(symbol: "circle.dotted.circle", title: "State") {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(groupColor(task.stateGroup))
+                                .frame(width: 7, height: 7)
+                            Text(task.status)
+                                .lineLimit(1)
+                        }
+                    }
+                    propertyRow(symbol: "cellularbars", title: "Priority") {
+                        priorityChip(task.priority)
+                    }
+                    propertyRow(symbol: "calendar.badge.clock", title: "Start Date") {
+                        Text(formattedTargetDate(task.startDate) ?? "—")
+                    }
+                    propertyRow(symbol: "calendar.badge.checkmark", title: "Due Date") {
+                        Text(formattedTargetDate(task.targetDate) ?? "—")
+                    }
+                    propertyRow(symbol: "folder", title: "Project") {
+                        Text(task.project)
+                            .lineLimit(1)
+                    }
                 }
-                Spacer(minLength: 0)
             }
-            HStack(spacing: 6) {
-                priorityChip(task.priority)
-                stateChip(task)
-                projectChip(task.project)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Text(task.name)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            if task.descriptionText.isEmpty {
-                Text("No description available.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-            } else {
-                RichDescriptionView(
-                    html: task.descriptionHTML,
-                    fallbackText: task.descriptionText
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(task.reference.uppercased())
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                Text(task.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                if task.descriptionText.isEmpty {
+                    Text("No description available.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                } else {
+                    // The web view is sized to its content, so the outer
+                    // ScrollView (not the web view) does the scrolling.
+                    RichDescriptionView(
+                        html: task.descriptionHTML,
+                        fallbackText: task.descriptionText,
+                        contentHeight: $descriptionHeight
+                    )
+                    .frame(maxWidth: .infinity)
+                    .frame(height: max(descriptionHeight, 24))
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One "Properties" line: SF Symbol + label on the left, value in a fixed column.
+    private func propertyRow<Value: View>(symbol: String, title: String, @ViewBuilder value: () -> Value) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .regular))
+                    .frame(width: 14)
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            .frame(width: 112, alignment: .leading)
+
+            value()
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+
+            Spacer(minLength: 0)
+        }
+        .frame(minHeight: 18)
     }
 
     /// Plane stores descriptions as HTML. AppKit's NSTextView is used here
@@ -1213,12 +1411,13 @@ private struct PlaneTasksWidget: View {
     private struct RichDescriptionView: NSViewRepresentable {
         let html: String?
         let fallbackText: String
+        @Binding var contentHeight: CGFloat
 
         func makeNSView(context: Context) -> WKWebView {
             let configuration = WKWebViewConfiguration()
             configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
-            let webView = WKWebView(frame: .zero, configuration: configuration)
+            let webView = PassthroughWebView(frame: .zero, configuration: configuration)
             webView.setValue(false, forKey: "drawsBackground")
             webView.allowsMagnification = false
             webView.navigationDelegate = context.coordinator
@@ -1227,6 +1426,10 @@ private struct PlaneTasksWidget: View {
         }
 
         func updateNSView(_ webView: WKWebView, context: Context) {
+            let heightBinding = $contentHeight
+            context.coordinator.onHeight = { height in
+                if abs(heightBinding.wrappedValue - height) > 0.5 { heightBinding.wrappedValue = height }
+            }
             let source = html?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let body = source.isEmpty ? fallbackText : source
             let document = Self.document(body: body)
@@ -1267,7 +1470,7 @@ private struct PlaneTasksWidget: View {
               <style>
                 :root {
                   color-scheme: dark;
-                  --text: rgba(255,255,255,.86);
+                  --text: rgba(255,255,255,.78);
                   --heading: rgba(255,255,255,.96);
                   --muted: rgba(255,255,255,.62);
                   --link: #5AA7FF;
@@ -1284,15 +1487,14 @@ private struct PlaneTasksWidget: View {
                   background: transparent;
                   color: var(--text);
                   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-                  font-size: 12px;
+                  font-size: 10.5px;
                   line-height: 1.5;
-                  overflow-x: hidden;
-                  overflow-y: auto;
+                  overflow: hidden;
                   -webkit-font-smoothing: antialiased;
                 }
 
                 body {
-                  padding: 2px 2px 10px;
+                  padding: 2px;
                   overflow-wrap: anywhere;
                   word-break: break-word;
                 }
@@ -1508,6 +1710,24 @@ private struct PlaneTasksWidget: View {
         @MainActor
         final class Coordinator: NSObject, WKNavigationDelegate {
             var lastDocument = ""
+            var onHeight: ((CGFloat) -> Void)?
+
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+                measure(webView)
+                // Fonts and images can settle a moment after didFinish.
+                Task { [weak self, weak webView] in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard let self, let webView else { return }
+                    self.measure(webView)
+                }
+            }
+
+            private func measure(_ webView: WKWebView) {
+                webView.evaluateJavaScript("Math.ceil(document.body.getBoundingClientRect().height)") { [weak self] result, _ in
+                    guard let height = (result as? NSNumber)?.doubleValue else { return }
+                    self?.onHeight?(CGFloat(height))
+                }
+            }
 
             func webView(
                 _ webView: WKWebView,
@@ -1577,6 +1797,10 @@ private struct PlaneTasksWidget: View {
             detailTask = task
             droplet.selectedTaskID = task.id
             isShowingDetail = false
+            detailOffsetY = 0
+            detailContentHeight = 0
+            detailViewportHeight = 0
+            descriptionHeight = 0
         }
 
         DispatchQueue.main.async {
@@ -1639,6 +1863,50 @@ private struct ShimmerModifier: ViewModifier {
 
 private extension View {
     func shimmering() -> some View { modifier(ShimmerModifier()) }
+}
+
+/// Web view that never scrolls on its own: wheel / trackpad events go to the
+/// enclosing SwiftUI ScrollView, so the whole detail page scrolls together.
+private final class PassthroughWebView: WKWebView {
+    override func scrollWheel(with event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
+    }
+}
+
+/// One row of the project menu: checkmark column, accent highlight on hover,
+/// the way an NSMenu item looks.
+private struct ProjectMenuRow: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .opacity(isSelected ? 1 : 0)
+                    .frame(width: 12)
+                Text(title)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(isHovering ? Color.white : Color.primary)
+            .padding(.horizontal, 8)
+            .frame(height: 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.accentColor.opacity(isHovering ? 1 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+    }
 }
 
 /// Explicitly removes AppKit scrollbars from SwiftUI ScrollViews while
@@ -1948,6 +2216,7 @@ private struct PlaneWorkItem: Decodable {
     let priority: String?
     let sequenceID: Int
     let targetDate: String?
+    let startDate: String?
     let createdAt: String?
     let state: PlaneState?
     let stateID: String?
@@ -1958,6 +2227,7 @@ private struct PlaneWorkItem: Decodable {
         case descriptionHTML = "description_html"
         case sequenceID = "sequence_id"
         case targetDate = "target_date"
+        case startDate = "start_date"
         case createdAt = "created_at"
     }
 
@@ -1973,6 +2243,7 @@ private struct PlaneWorkItem: Decodable {
         priority = try? container.decodeIfPresent(String.self, forKey: .priority)
         sequenceID = (try? container.decode(Int.self, forKey: .sequenceID)) ?? 0
         targetDate = try? container.decodeIfPresent(String.self, forKey: .targetDate)
+        startDate = try? container.decodeIfPresent(String.self, forKey: .startDate)
         createdAt = try? container.decodeIfPresent(String.self, forKey: .createdAt)
         state = try? container.decodeIfPresent(PlaneState.self, forKey: .state)
         stateID = (try? container.decodeIfPresent(String.self, forKey: .state)) ?? state?.id
@@ -2011,7 +2282,7 @@ private struct PlanePage<Value: Decodable>: Decodable {
     private enum CodingKeys: String, CodingKey { case results, data }
 }
 fileprivate struct PlaneTask: Identifiable {
-    let id: String; let name: String; let reference: String; let targetDate: String?; let createdAt: String?
+    let id: String; let name: String; let reference: String; let targetDate: String?; let startDate: String?; let createdAt: String?
     let priority: String; let status: String; let stateGroup: String; let descriptionText: String; let descriptionHTML: String?
     let project: String; let webURL: URL
     var priorityColor: Color { switch priority { case "urgent": .red; case "high": .orange; case "medium": .yellow; default: .secondary } }
@@ -2053,7 +2324,7 @@ private struct PlaneClient: Sendable {
                 .replacingOccurrences(of: "&gt;", with: ">")
                 .replacingOccurrences(of: "&quot;", with: "\"")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return PlaneTask(id: item.id, name: item.name, reference: reference, targetDate: item.targetDate, createdAt: item.createdAt,
+            return PlaneTask(id: item.id, name: item.name, reference: reference, targetDate: item.targetDate, startDate: item.startDate, createdAt: item.createdAt,
                              priority: item.priority ?? "none", status: resolvedStatus ?? "Unknown",
                              stateGroup: resolvedGroup, descriptionText: plainDescription, descriptionHTML: item.descriptionHTML,
                              project: Self.projectDisplayName(project), webURL: url)
