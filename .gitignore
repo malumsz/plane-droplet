@@ -6,3 +6,8 @@ droppykit/
 shots/
 report.json
 .index-build/
+
+.backups/
+.mcp.json
+.cursor/mcp.json
+shots/
