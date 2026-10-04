@@ -278,7 +278,11 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
 
     private func loadTasks() async {
         guard !workspace.isEmpty, let token = tokenStore.read(), !token.isEmpty else { state = .needsSetup; tasks = []; return }
-        guard let base = URL(string: baseURL) else { state = .failed("The Plane URL is invalid."); return }
+        guard let base = URL(string: baseURL),
+              let scheme = base.scheme?.lowercased(),
+              let urlHost = base.host,
+              scheme == "https" || (scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(urlHost))
+        else { state = .failed("Use an https:// Plane URL."); return }
         let keepsCurrentTasks = !tasks.isEmpty
         isRefreshing = keepsCurrentTasks
         refreshError = nil
@@ -339,8 +343,9 @@ public final class PlaneTasksDroplet: NSObject, ObservableObject, Droplet {
         Binding(
             get: { self.tokenStore.read() ?? "" },
             set: {
-                self.tokenStore.write($0)
+                let saved = self.tokenStore.write($0)
                 self.credentialsChanged()
+                if !saved { self.refreshError = "Couldn't save the token to the Keychain." }
             }
         )
     }
@@ -1480,9 +1485,6 @@ private struct PlaneTasksWidget: View {
         .frame(minHeight: 18)
     }
 
-    /// Plane stores descriptions as HTML. AppKit's NSTextView is used here
-    /// instead of a browser view so rich text is laid out by native macOS
-    /// text rendering: wrapping, lists, emphasis, links, code and tables.
     /// Plane stores the description as Tiptap HTML. Use WebKit here because
     /// Plane itself renders this same HTML model in a browser/editor. This
     /// keeps headings, paragraphs, emphasis, links, lists, checklists, tables,
@@ -2452,10 +2454,23 @@ private final class TokenStore {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "personal-access-token", kSecReturnData as String: true]
         var result: CFTypeRef?; guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }; return String(data: data, encoding: .utf8)
     }
-    func write(_ token: String) {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: "personal-access-token"]
-        if token.isEmpty { SecItemDelete(query as CFDictionary); return }
-        let data = Data(token.utf8); let update = [kSecValueData as String: data]
-        if SecItemUpdate(query as CFDictionary, update as CFDictionary) == errSecItemNotFound { var add = query; add[kSecValueData as String] = data; SecItemAdd(add as CFDictionary, nil) }
+    @discardableResult
+    func write(_ token: String) -> Bool {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: "personal-access-token"]
+        if token.isEmpty {
+            let status = SecItemDelete(query as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+        let data = Data(token.utf8)
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+            return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        }
+        return status == errSecSuccess
     }
 }

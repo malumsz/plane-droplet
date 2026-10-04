@@ -11,3 +11,6 @@ report.json
 .mcp.json
 .cursor/mcp.json
 shots/
+AGENTS.md
+CLAUDE.md
+.cursor/
