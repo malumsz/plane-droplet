@@ -1,7 +1,7 @@
 {
   "id": "plane-tasks",
   "name": "Plane Tasks",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "summary": "Your open Plane tasks, on the Droppy shelf",
   "description": "Shows open Plane work items assigned to the person behind the configured personal access token.",
   "category": "Productivity",
