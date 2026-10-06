@@ -1,49 +1,81 @@
-# Plane Tasks
+<div align="center">
 
-A Droppy shelf widget that shows open Plane work items assigned to the user
-behind a Personal Access Token.
+<img src="Assets/icon.png" alt="Plane Tasks" width="88" height="88">
+<img src="https://gitlab.com/droppyformac1/droplets/-/raw/main/assets/droplet-store.png" alt="Droppy" width="88" height="88">
 
-## Set up
+ <h1>Plane Tasks</h1>
 
-1. In Plane, open **Profile settings → Personal Access Tokens** and create a
-   token.
-2. In Droppy, open this droplet's settings and enter the workspace slug from
-   `https://app.plane.so/<workspace-slug>/` and the token.
-3. Press **Refresh**. The shelf lists the first three open assignments; each
-   row opens that item in Plane.
+A [Droppy](https://getdroppy.app) droplet that keeps your [Plane](https://plane.so) work items on the shelf.
 
-The token is stored in the macOS Keychain under `app.getdroppy.plane-tasks`.
-The workspace slug and optional API URL are stored in Droppy's isolated
-preferences. Plane Cloud uses `https://api.plane.so`; change the API URL only
-for a self-hosted Plane instance.
+<p>
+  <img alt="Version" src="https://shieldcn.dev/badge/version-1.1.0.svg?variant=outline&size=sm&logo=ri:LuTag">
+  <img alt="DroppyKit" src="https://shieldcn.dev/badge/DroppyKit-1.20.1.svg?variant=outline&size=sm&logo=ri:LuPackage">
+  <a href="LICENSE"><img alt="License" src="https://shieldcn.dev/badge/license-MIT.svg?variant=outline&size=sm&logo=ri:LuScale"></a>
+</p>
 
-A Droplet for [Droppy](https://getdroppy.app), built with
-[DroppyKit](https://getdroppy.app/docs/droppykit).
+[Features](#features) · [Install](#install) · [Set up](#set-up) · [Security](#security) · [Changelog](CHANGELOG.md)
 
-## Developing
+</div>
+
+<br>
+
+<div align="center">
+<img width="465" height="auto" alt="Droppy_2026-10-03-22-52-23_E767DA-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/4118a9f5-b54f-4a52-8431-0c8fbd0d3d4f" />
+<img width="493" height="auto" alt="Droppy_2026-10-03-22-44-05_8F9D8F-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/ab7a096a-a03c-40ef-b735-d45562ca5574" />
+</div>
+
+---
+
+### Features
+
+- **Assigned work items** from every project you can access in your workspace, newest first.
+- **Pinned tab** for the tasks you want to keep in view, regardless of project or status.
+- **Filters and search** with status chips and counts, a project menu, and search by title, ID or project.
+- **Task details** with state, priority, dates and project, plus the description rendered with its formatting: headings, lists, checklists, tables, code and links.
+- **New task alerts** beside the notch.
+- **Compact widget** that shows your pinned tasks.
+- **Open in Plane** from any task.
+
+### Requirements
+
+- macOS 15 or later
+- Droppy 15.3 or later, or [Droppy Playground](https://getdroppy.app/download/playground)
+- A Plane account and a ``Personal Access Token``
+
+### Install
 
 ```bash
-droppykit run        # open it in Droppy's Settings panel
-droppykit build      # produce PlaneTasks.droplet
-droppykit validate   # the checks the Store repository runs
-droppykit submit     # open the merge request that puts it in the Store
+git clone https://github.com/malumsz/plane-droplet.git
+cd plane-droplet
+droppykit build      # writes .build/PlaneTasks.droplet
 ```
 
-## With a coding agent
+This needs the [DroppyKit command line tool](https://getdroppy.app/docs/droppykit).
 
-Open this folder in Claude Code, Codex or Cursor. `AGENTS.md` is the brief
-they read first, and `.mcp.json` / `.cursor/mcp.json` connect the DroppyKit
-MCP server, which gives them the build, the checks, pictures of every surface
-and an install into Droppy Playground as tools. Codex registers the server
-once per Mac: `codex mcp add droppykit -- path/to/droppykit/Scripts/droppykit mcp`.
-Run `droppykit agent` again after moving this folder or the SDK checkout.
+Droppy runs an unsigned droplet once you approve the build under **Settings → Store → Local droplets**. Droppy Playground loads unsigned droplets without asking.
 
-## Before submitting
+### Set up
 
-- Replace `PlaneTasks.icon` with real artwork, in Icon Composer.
-- Replace `Assets/Creator.png` with your own square, unrounded mark.
-- Fill in `summary`, `description` and `creator` in `droplet.json`, and
-  write `CHANGELOG.md`.
-- `droppykit submit`: the Store is a repository, one folder per droplet, and
-  this opens the merge request that adds yours. See
-  [Submitting](https://getdroppy.app/docs/droppykit/submitting).
+1. In Plane, open **Profile settings → Personal Access Tokens** and create a token.
+2. In Droppy, open this droplet's settings and fill in:
+
+   | Field | Value |
+   | --- | --- |
+   | Workspace slug | The slug from `https://app.plane.so/<workspace-slug>/` |
+   | Personal access token | The token you created |
+   | Plane API URL | Only for self-hosted Plane. Plane Cloud uses `https://api.plane.so` |
+
+3. Press **Refresh**.
+
+### Security
+
+- The token is stored in the macOS Keychain.
+- The droplet only talks to the API URL you configure. It must use `https`.
+- The workspace slug may only contain letters, numbers, `-` and `_`.
+- Workspace slug, API URL, pinned tasks and notification settings live in Droppy's isolated preferences for this droplet.
+
+### License
+
+[MIT](LICENSE) © [malumsz](https://github.com/malumsz)
+
+---
