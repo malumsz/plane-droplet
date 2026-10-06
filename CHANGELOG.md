@@ -1,7 +1,5 @@
 # Changelog
 
-All notable changes to this droplet are documented here.
-
 ## [1.1.0] - 2026-10-03
 
 ### Added

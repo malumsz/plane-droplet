@@ -10,7 +10,9 @@
     "minAPI": "1.9.0"
   },
   "minAppVersion": "15.3.0",
-  "capabilities": ["network-client"],
+  "capabilities": [
+    "network-client"
+  ],
   "surfaces": [
     "shelf-widget",
     "live-activity",
@@ -21,11 +23,17 @@
     "name": "malumsz",
     "kind": "community",
     "url": "https://github.com/malumsz",
-    "avatar": "Creator.png"
+    "avatar": "Creator.png",
+    "gitlab": "malumsz"
   },
   "source": {
-    "repository": "https://github.com/malumsz/plane-droplet",
+    "repository": "https://gitlab.com/droppyformac1/droplets/-/tree/main/droplets/plane-tasks",
     "license": "MIT"
   },
-  "keywords": ["Plane", "tasks", "assigned", "productivity"]
+  "keywords": [
+    "Plane",
+    "tasks",
+    "assigned",
+    "productivity"
+  ]
 }
