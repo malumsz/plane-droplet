@@ -20,8 +20,8 @@ A [Droppy](https://getdroppy.app) droplet that keeps your [Plane](https://plane.
 <br>
 
 <div align="center">
-<img width="465" height="auto" alt="Droppy_2026-10-03-22-52-23_E767DA-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/4118a9f5-b54f-4a52-8431-0c8fbd0d3d4f" />
-<img width="493" height="auto" alt="Droppy_2026-10-03-22-44-05_8F9D8F-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/ab7a096a-a03c-40ef-b735-d45562ca5574" />
+<img width="265" height="auto" alt="Droppy_2026-10-03-22-52-23_E767DA-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/4118a9f5-b54f-4a52-8431-0c8fbd0d3d4f" />
+<img width="283" height="auto" alt="Droppy_2026-10-03-22-44-05_8F9D8F-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/ab7a096a-a03c-40ef-b735-d45562ca5574" />
 </div>
 
 ---
